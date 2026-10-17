@@ -1,0 +1,42 @@
+name: Build and test Mimicry
+
+on:
+  push:
+    branches: [ "**" ]
+  pull_request:
+    branches: [ "**" ]
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        submodules: recursive
+
+    - name: Configure CMake
+      run: cmake -B build -DCMAKE_BUILD_TYPE=Release
+
+    - name: Build
+      run: cmake --build build --config Release
+
+    - name: Test
+      run: ctest --test-dir build -C Release --output-on-failure
+
+    - name: Upload binaries
+      uses: actions/upload-artifact@v4
+      with:
+        name: mimicry-${{ runner.os }}
+        path: |
+          build/mimicry
+          build/mimicry_worker
+          build/mimicry_test_synth.clap
+          build/Release/mimicry.exe
+          build/Release/mimicry_worker.exe
+          build/Release/mimicry_test_synth.clap
+        if-no-files-found: ignore
