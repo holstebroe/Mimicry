@@ -40,15 +40,20 @@ endfunction()
 
 add_library(mimicry_core STATIC
     src/core/Fft.cpp
+    src/core/Ipc.cpp
     src/core/Json.cpp
     src/core/Outcome.cpp
     src/core/Wav.cpp
 )
 target_include_directories(mimicry_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    target_link_libraries(mimicry_core PUBLIC rt)  # shm_open on glibc < 2.34
+endif()
 target_compile_definitions(mimicry_core PUBLIC MIMICRY_VERSION=\"${PROJECT_VERSION}\")
 mimicry_warnings(mimicry_core)
 
 add_library(mimicry_host STATIC
+    src/host/Codec.cpp
     src/host/FileHash.cpp
     src/host/MessagePump.cpp
     src/host/ParamUtil.cpp
@@ -72,11 +77,19 @@ else()
     target_sources(mimicry_host PRIVATE src/host/clap/ClapEngineStub.cpp)
 endif()
 
+# Supervisor side of the worker protocol. Includes only the Instance interface, never a plugin loader.
+add_library(mimicry_supervisor STATIC
+    src/supervisor/WorkerClient.cpp
+    src/supervisor/WorkerPool.cpp
+)
+target_link_libraries(mimicry_supervisor PUBLIC mimicry_host mimicry_core)
+mimicry_warnings(mimicry_supervisor)
+
 # --- Executables -------------------------------------------------------------------------------
 
 # Supervisor / command line.
 add_executable(mimicry src/app/main.cpp)
-target_link_libraries(mimicry PRIVATE mimicry_host mimicry_core)
+target_link_libraries(mimicry PRIVATE mimicry_supervisor mimicry_host mimicry_core)
 mimicry_warnings(mimicry)
 
 # Render worker: the only process that loads plugins (docs/spec/05_RESILIENCE.md section 1).
@@ -122,5 +135,12 @@ if(MIMICRY_BUILD_TESTS)
         mimicry_warnings(mimicry_host_test)
         add_dependencies(mimicry_host_test mimicry_test_synth)
         add_test(NAME host_clap COMMAND mimicry_host_test $<TARGET_FILE:mimicry_test_synth>)
+
+        add_executable(mimicry_worker_test src/tests/worker_test_main.cpp)
+        target_link_libraries(mimicry_worker_test PRIVATE mimicry_supervisor mimicry_host mimicry_core)
+        target_include_directories(mimicry_worker_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+        mimicry_warnings(mimicry_worker_test)
+        add_dependencies(mimicry_worker_test mimicry_test_synth mimicry_worker)
+        add_test(NAME worker_clap COMMAND mimicry_worker_test $<TARGET_FILE:mimicry_test_synth> $<TARGET_FILE:mimicry_worker>)
     endif()
 endif()
