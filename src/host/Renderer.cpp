@@ -170,6 +170,11 @@ expected<Audio, Outcome> Renderer::render(const Job& job) {
         values.push_back({p.id, std::clamp(std::isfinite(u) ? u : p.default_coord, 0.0, 1.0)});
     }
 
+    try {
+        engine_->apply_controller_values(values);
+    } catch (...) {
+    }
+
     // Note plan to sample-exact events, relative to the first note (after the settle period).
     const int rate = rate_;
     const int block = std::max(1, job.block_size);

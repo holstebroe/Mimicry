@@ -254,6 +254,17 @@ clap_process_status plugin_process(const clap_plugin_t* plugin, const clap_proce
     return CLAP_PROCESS_CONTINUE;
 }
 
+// The clap-wrapper's plugin extension (include/clapwrapper/vst3.h, "clap.plugin-info-as-vst3/0"), declared
+// here to keep the CLAP build free of the wrapper: it tells the VST3 build to offer note tuning.
+constexpr char kPluginAsVst3[] = "clap.plugin-info-as-vst3/0";
+struct PluginAsVst3 {
+    uint32_t (*num_midi_channels)(const clap_plugin_t*, uint32_t note_port);
+    uint32_t (*supported_note_expressions)(const clap_plugin_t*);
+};
+constexpr uint32_t kVst3ExpressionTuning = 1u << 2;
+const PluginAsVst3 kAsVst3 = {[](const clap_plugin_t*, uint32_t) -> uint32_t { return 1; },
+                              [](const clap_plugin_t*) -> uint32_t { return kVst3ExpressionTuning; }};
+
 const void* plugin_get_extension(const clap_plugin_t*, const char* id) {
     if (!std::strcmp(id, CLAP_EXT_PARAMS)) return &kParamsExt;
     if (!std::strcmp(id, CLAP_EXT_AUDIO_PORTS)) return &kAudioPorts;
@@ -261,6 +272,7 @@ const void* plugin_get_extension(const clap_plugin_t*, const char* id) {
     if (!std::strcmp(id, CLAP_EXT_STATE)) return &kState;
     if (!std::strcmp(id, CLAP_EXT_TAIL)) return &kTail;
     if (!std::strcmp(id, CLAP_EXT_LATENCY)) return &kLatency;
+    if (!std::strcmp(id, kPluginAsVst3)) return &kAsVst3;
     return nullptr;
 }
 

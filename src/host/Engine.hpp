@@ -61,6 +61,9 @@ public:
     [[nodiscard]] virtual bool rescan_parameters() = 0;
     // True once if the plugin asked for a restart since the last call.
     [[nodiscard]] virtual bool take_restart_request() = 0;
+    // Main thread, before block 0: lets a backend mirror the values on its controller object (VST3
+    // setParamNormalized, spec 02 section 2). The values still reach the plugin through the block.
+    virtual void apply_controller_values(std::span<const ParamValue>) {}
     // Runs plugin callbacks that were requested for the main thread (clap on_main_thread, VST3 runloop).
     virtual void pump_main_thread() {}
 

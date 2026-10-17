@@ -43,6 +43,12 @@ std::string units_from_texts(std::span<const std::string> texts) {
     return common;
 }
 
+bool looks_like_program_param(const std::string& name) {
+    std::string n = trim(name);
+    std::ranges::transform(n, n.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    return n == "program" || n == "preset" || n == "patch" || n == "program change";
+}
+
 bool use_log_scale(double min, double max, int steps, const std::string& units) {
     if (steps > 0 || !(min > 0) || !(max > min)) return false;
     if (units == "Hz" || units == "kHz" || units == "ms" || units == "s") return true;

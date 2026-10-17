@@ -42,10 +42,12 @@ std::vector<double> defaults(const Instance& inst) {
 
 // Sets a parameter by its plain value.
 void set_plain(const Instance& inst, std::vector<double>& coords, ts::ParamId id, double plain) {
+    // The synth's own table gives the plain range; both formats' coordinates are linear or log in it
+    // (the VST3 wrapper maps normalised linearly to the CLAP plain range, so the CLAP decode applies).
     const auto i = index_of(inst, id);
-    const auto& p = inst.parameters()[i];
-    coords[i] = (plain - p.min) / (p.max - p.min);
-    if (p.log_scale) coords[i] = std::log(plain / p.min) / std::log(p.max / p.min);
+    const auto& want = ts::kParams[id];
+    coords[i] = (plain - want.min) / (want.max - want.min);
+    if (inst.parameters()[i].log_scale) coords[i] = std::log(plain / want.min) / std::log(want.max / want.min);
 }
 
 Job make_job(const Instance& inst, double on_ms = 0, double off_ms = 500, int key = 60, double cents = 0) {
@@ -71,7 +73,8 @@ double dominant_hz(const Audio& a, double from_s, double to_s) {
 
 void test_enumeration(Instance& inst) {
     const auto& info = inst.info();
-    check(info.uid == "org.mimicry.test-synth", "uid: " + info.uid);
+    const bool clap = info.format == PluginFormat::Clap;
+    check(!info.uid.empty() && (!clap || info.uid == "org.mimicry.test-synth"), "uid: " + info.uid);
     check(info.kind == PluginKind::Instrument, "kind is Instrument");
     check(!info.version_hash.empty() && info.version_hash != "unknown", "version hash is set");
 
@@ -87,14 +90,21 @@ void test_enumeration(Instance& inst) {
         check(got.flags.hidden == want.hidden && got.flags.readonly == want.readonly && got.flags.bypass == want.bypass,
               std::string("flags of ") + want.name);
         check((got.steps > 0) == want.stepped, std::string("stepped flag of ") + want.name);
-        check(got.log_scale == (want.scale == ts::Scale::Log && !want.stepped),
-              std::string("log decision of ") + want.name);
-        check(std::fabs(got.min - want.min) < 1e-9 && std::fabs(got.max - want.max) < 1e-9, std::string("range of ") + want.name);
+        // CLAP exposes plain ranges and a log/linear decode; VST3 the plugin's own normalised coordinate.
+        if (clap) {
+            check(got.log_scale == (want.scale == ts::Scale::Log && !want.stepped),
+                  std::string("log decision of ") + want.name);
+            check(std::fabs(got.min - want.min) < 1e-9 && std::fabs(got.max - want.max) < 1e-9,
+                  std::string("range of ") + want.name);
+        } else {
+            check(!got.log_scale && got.min == 0 && got.max == 1, std::string("normalised range of ") + want.name);
+        }
         check(!got.texts[0].empty() && !got.texts[4].empty(), std::string("value texts of ") + want.name);
     }
     check(ps[ts::kProgram].flags.program_change, "program parameter is flagged");
     check(!ps[ts::kWave].flags.program_change, "wave is not a program parameter");
     check(inst.value_text(ts::kCutoff, 1.0).find("20000") != std::string::npos, "value_text(cutoff, 1) = " + inst.value_text(ts::kCutoff, 1.0));
+    check(inst.value_text(ts::kWave, 0.0) == "Sine" && inst.value_text(ts::kWave, 1.0) == "Saw", "enum value texts");
 }
 
 void test_rendering(Instance& inst) {
@@ -194,6 +204,40 @@ void test_restart_and_state(Instance& inst, const std::string& path) {
     check(!(*other)->load_state({1, 2, 3}).has_value(), "load_state rejects garbage");
 }
 
+// T13: the same synth as CLAP and as VST3 gives the same parameters and (nearly) the same audio.
+void test_equivalence(Instance& a, Instance& b) {
+    const auto& pa = a.parameters();
+    const auto& pb = b.parameters();
+    check(pa.size() == pb.size(), "same parameter count in both formats");
+    if (pa.size() != pb.size()) return;
+    for (std::size_t i = 0; i < pa.size(); ++i) {
+        check(pa[i].id == pb[i].id && pa[i].name == pb[i].name && pa[i].module == pb[i].module,
+              "same id/name/module for " + pa[i].name);
+        check(pa[i].units == pb[i].units, "same units for " + pa[i].name + ": '" + pa[i].units + "' vs '" + pb[i].units + "'");
+        check(pa[i].flags.hidden == pb[i].flags.hidden && pa[i].flags.readonly == pb[i].flags.readonly &&
+                  pa[i].flags.bypass == pb[i].flags.bypass && pa[i].flags.program_change == pb[i].flags.program_change,
+              "same flags for " + pa[i].name);
+    }
+    auto ja = make_job(a, 0, 500), jb = make_job(b, 0, 500);
+    for (Job* j : {&ja, &jb}) {
+        Instance& inst = j == &ja ? a : b;
+        set_plain(inst, j->coords, ts::kCutoff, 2000);
+        set_plain(inst, j->coords, ts::kAttack, 20);
+        set_plain(inst, j->coords, ts::kWave, 1);
+    }
+    auto ra = a.render(ja), rb = b.render(jb);
+    check(ra && rb, "both formats render");
+    if (!ra || !rb) return;
+    const std::size_t n = std::min(ra->samples.size(), rb->samples.size());
+    double err = 0, ref = 0;
+    for (std::size_t i = 0; i < n; ++i) {
+        const double d = static_cast<double>(ra->samples[i]) - static_cast<double>(rb->samples[i]);
+        err += d * d;
+        ref += static_cast<double>(ra->samples[i]) * static_cast<double>(ra->samples[i]);
+    }
+    check(ref > 0 && std::sqrt(err / ref) < 0.02, "audio matches across formats: relative error " + std::to_string(std::sqrt(err / ref)));
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -213,6 +257,12 @@ int main(int argc, char** argv) {
     test_failures(**inst);
     test_pinning(**inst);
     test_restart_and_state(**inst, path);
+
+    if (argc >= 3) {
+        auto other = open(argv[2]);
+        check(other.has_value(), "second format opens");
+        if (other) test_equivalence(**inst, **other);
+    }
 
     check(!open("/nonexistent/x.clap").has_value(), "a missing file is an error");
     check(!open(path + ".nope").has_value(), "a wrong path is an error");

@@ -1,5 +1,8 @@
 cmake_minimum_required(VERSION 3.21)
 project(Mimicry VERSION 0.1.0 LANGUAGES C CXX)
+if(APPLE)
+    enable_language(OBJCXX)
+endif()
 
 # C++20 (docs/spec/01_ARCHITECTURE.md section 3). std::expected is shimmed in src/core/Expected.hpp.
 if(NOT CMAKE_CXX_STANDARD)
@@ -16,6 +19,9 @@ endif()
 # option only records the intent; the VST3 SDK is fetched, or taken from VST3_SDK_ROOT, once it is used.
 option(MIMICRY_VST3_HOSTING "Host VST3 plugins (needs the VST3 SDK)" ON)
 option(MIMICRY_BUILD_TESTS "Build the test executables" ON)
+
+list(APPEND CMAKE_MODULE_PATH ${CMAKE_CURRENT_SOURCE_DIR}/cmake)
+include(Vst3Sdk)
 
 # Link-time optimisation in Release builds (as in Acidus and Tannhauser).
 include(CheckIPOSupported)
@@ -59,7 +65,6 @@ add_library(mimicry_host STATIC
     src/host/ParamUtil.cpp
     src/host/PluginHost.cpp
     src/host/Renderer.cpp
-    src/host/vst3/Vst3Engine.cpp
 )
 find_package(Threads REQUIRED)
 target_link_libraries(mimicry_host PUBLIC mimicry_core Threads::Threads ${CMAKE_DL_LIBS})
@@ -67,6 +72,28 @@ if(APPLE)
     target_link_libraries(mimicry_host PUBLIC "-framework CoreFoundation")
 endif()
 mimicry_warnings(mimicry_host)
+
+# VST3 backend: SDK hosting classes (cmake/Vst3Sdk.cmake).
+if(MIMICRY_HAVE_VST3)
+    target_sources(mimicry_host PRIVATE src/host/vst3/Vst3Engine.cpp)
+    target_include_directories(mimicry_host SYSTEM PRIVATE ${MIMICRY_VST3_SDK_DIR})
+    target_link_libraries(mimicry_host PRIVATE sdk_hosting sdk_common sdk base pluginterfaces)
+    # Hosting sources the SDK's own libraries leave out: the per-platform module loader, the plug provider
+    # and the memory stream.
+    set(_h ${MIMICRY_VST3_SDK_DIR}/public.sdk/source)
+    target_sources(mimicry_host PRIVATE ${_h}/vst/hosting/plugprovider.cpp ${_h}/common/memorystream.cpp)
+    if(WIN32)
+        target_sources(mimicry_host PRIVATE ${_h}/vst/hosting/module_win32.cpp)
+    elseif(APPLE)
+        target_sources(mimicry_host PRIVATE ${_h}/vst/hosting/module_mac.mm)
+        set_source_files_properties(${_h}/vst/hosting/module_mac.mm PROPERTIES COMPILE_FLAGS "-fobjc-arc")
+        target_link_libraries(mimicry_host PUBLIC "-framework Foundation")
+    else()
+        target_sources(mimicry_host PRIVATE ${_h}/vst/hosting/module_linux.cpp)
+    endif()
+else()
+    target_sources(mimicry_host PRIVATE src/host/vst3/Vst3EngineStub.cpp)
+endif()
 
 # CLAP backend: needs the clap submodule headers (git submodule update --init).
 if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/clap/include/clap/clap.h)
@@ -114,6 +141,28 @@ else()
     message(STATUS "clap submodule not found: skipping mimicry_test_synth")
 endif()
 
+# --- Test plugin as VST3 (clap-wrapper) ----------------------------------------------------------
+# A separate project (src/tests/test_synth_vst3), built from here so both backends test the same code.
+set(MIMICRY_TEST_SYNTH_VST3 "")
+if(MIMICRY_HAVE_VST3 AND TARGET mimicry_test_synth AND MIMICRY_BUILD_TESTS)
+    include(ExternalProject)
+    set(_tsv_bin ${CMAKE_BINARY_DIR}/test_synth_vst3)
+    ExternalProject_Add(mimicry_test_synth_vst3_build
+        SOURCE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/src/tests/test_synth_vst3
+        BINARY_DIR ${_tsv_bin}
+        CMAKE_ARGS -DCLAP_ROOT=${CMAKE_CURRENT_SOURCE_DIR}/clap -DSRC_ROOT=${CMAKE_CURRENT_SOURCE_DIR}/src
+                   -DVST3_SDK_ROOT=${MIMICRY_VST3_SDK_DIR} -DCMAKE_BUILD_TYPE=${CMAKE_BUILD_TYPE}
+        BUILD_COMMAND ${CMAKE_COMMAND} --build <BINARY_DIR> --target mimicry_test_synth_vst3 --config ${CMAKE_BUILD_TYPE}
+        INSTALL_COMMAND ""
+        BUILD_ALWAYS ON
+        USES_TERMINAL_BUILD ON)
+    if(WIN32)
+        set(MIMICRY_TEST_SYNTH_VST3 ${_tsv_bin}/assets/VST3/mimicry_test_synth.vst3)
+    else()
+        set(MIMICRY_TEST_SYNTH_VST3 ${_tsv_bin}/assets/mimicry_test_synth.vst3)
+    endif()
+endif()
+
 # --- Tests -------------------------------------------------------------------------------------
 
 if(MIMICRY_BUILD_TESTS)
@@ -141,6 +190,13 @@ if(MIMICRY_BUILD_TESTS)
         target_include_directories(mimicry_worker_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
         mimicry_warnings(mimicry_worker_test)
         add_dependencies(mimicry_worker_test mimicry_test_synth mimicry_worker)
+        if(MIMICRY_TEST_SYNTH_VST3)
+            add_dependencies(mimicry_host_test mimicry_test_synth_vst3_build)
+            add_dependencies(mimicry_worker_test mimicry_test_synth_vst3_build)
+            add_test(NAME host_vst3 COMMAND mimicry_host_test ${MIMICRY_TEST_SYNTH_VST3})
+            add_test(NAME equivalence_clap_vst3 COMMAND mimicry_host_test $<TARGET_FILE:mimicry_test_synth> ${MIMICRY_TEST_SYNTH_VST3})
+            add_test(NAME worker_vst3 COMMAND mimicry_worker_test ${MIMICRY_TEST_SYNTH_VST3} $<TARGET_FILE:mimicry_worker>)
+        endif()
         add_test(NAME worker_clap COMMAND mimicry_worker_test $<TARGET_FILE:mimicry_test_synth> $<TARGET_FILE:mimicry_worker>)
     endif()
 endif()

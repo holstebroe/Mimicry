@@ -21,7 +21,7 @@ Instance::reset()                         -> expected<void>                    /
 
 `ParamDesc` = `{ id (uint32), name, module path, units, steps (0 = continuous), default, flags (hidden,
 readonly, bypass, program-change, automatable), coord }`. Both formats use 32-bit parameter ids [S: CLAP
-`param_id`, VST3 `ParamID`]. The first skeleton of this interface is in `src/host/PluginHost.hpp`.
+`param_id`, VST3 `ParamID`]. The interface is in `src/host/PluginHost.hpp`; backends implement the smaller `Engine` (`src/host/Engine.hpp`) and the shared render core `Renderer` implements `Instance` on top of it [A]. `Job.coords` has one entry per `parameters()` entry; the render core ignores read-only entries and pins bypass and program-change to their default [A].
 
 **Mimicry coordinate** `u ∈ [0,1]` (04 §1):
 - **VST3**: the plugin's own *normalised* value. The plugin's taper is kept, since designers usually
@@ -43,7 +43,7 @@ string or the VST3 class id (TUID) plus name.
 | Setup | `activate(rate, min, max)` | `setupProcessing(ProcessSetup{ kOffline, kSample32, max block, rate })`, bus arrangement (stereo out), `setActive(true)` |
 | Start | `start_processing` | `setProcessing(true)` |
 | Parameters | `clap.params` (plain min/max, `value_to_text`) | `IEditController` params (normalised, `getParamStringByValue`, `ParameterInfo.units`), units via `IUnitInfo` |
-| Apply a value | `CLAP_EVENT_PARAM_VALUE` at time 0 | `ProcessData::inputParameterChanges` (`IParamValueQueue`, sample offset 0) **and** `setParamNormalized` on the controller |
+| Apply a value | `CLAP_EVENT_PARAM_VALUE` at time 0 | `ProcessData::inputParameterChanges` (`IParamValueQueue`, sample offset 0) **and** `setParamNormalized` on the controller, called on the main thread before block 0 (`Engine::apply_controller_values`) [A] |
 | Notes | `CLAP_EVENT_NOTE_ON/OFF`, velocity 0..1 | `Event::kNoteOnEvent/kNoteOffEvent` through `IEventList`, velocity 0..1, `noteId` |
 | Fine tuning | note-expression TUNING | `NoteOnEvent.tuning` (cents): native |
 | Transport | `clap_event_transport` | `ProcessContext` (`kPlaying | kTempoValid | kTimeSigValid`, 120 BPM) |
@@ -61,6 +61,7 @@ Rules for the VST3 backend:
 - Plain 32-bit float processing is the default; 64-bit only if the plugin asks. Mono-only or unusual bus
   layouts are negotiated, and a plugin that refuses stereo out is rendered in its own layout and
   mixed to mono.
+- A stepped parameter named Program / Preset / Patch is treated as a program-change parameter even without the flag (CLAP has none; wrappers do not always set VST3's) [I].
 - Hide-flagged, read-only, and bypass parameters are excluded as in §4; the program-change parameter is
   pinned to a fixed program so a preset change cannot overwrite the candidate's parameters.
 

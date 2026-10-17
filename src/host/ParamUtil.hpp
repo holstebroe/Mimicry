@@ -17,6 +17,10 @@ namespace mimicry::host {
 // Stepped parameters are never log.
 [[nodiscard]] bool use_log_scale(double min, double max, int steps, const std::string& units);
 
+// CLAP has no program-change flag, and wrappers do not always set VST3's: a stepped parameter named like
+// one is pinned all the same [I].
+[[nodiscard]] bool looks_like_program_param(const std::string& name);
+
 [[nodiscard]] double coord_to_plain(const ParamDesc& p, double u);
 [[nodiscard]] double plain_to_coord(const ParamDesc& p, double plain);
 

@@ -29,16 +29,6 @@ union Event {
     clap_event_note_expression_t expression;
 };
 
-std::string lower(std::string s) {
-    std::ranges::transform(s, s.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-    return s;
-}
-
-bool looks_like_program_param(const std::string& name) {
-    const std::string n = lower(name);
-    return n == "program" || n == "preset" || n == "patch" || n == "program change";
-}
-
 class ClapEngine final : public Engine {
 public:
     ClapEngine(std::shared_ptr<ThreadRoles> roles) : roles_(std::move(roles)) {

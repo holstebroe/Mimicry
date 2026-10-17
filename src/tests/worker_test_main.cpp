@@ -78,7 +78,7 @@ int main(int argc, char** argv) {
     if (!direct || !client) return 1;
     WorkerClient& w = **client;
     check(w.info().uid == (*direct)->info().uid && w.info().version_hash == (*direct)->info().version_hash, "info crosses the process boundary");
-    check(w.parameters().size() == (*direct)->parameters().size() && w.parameters()[ts::kCutoff].log_scale &&
+    check(w.parameters().size() == (*direct)->parameters().size() && w.parameters()[ts::kCutoff].log_scale == (w.info().format == host::PluginFormat::Clap) &&
               w.parameters()[ts::kCutoff].units == "Hz" && w.parameters()[ts::kProgram].flags.program_change,
           "parameters cross the process boundary");
     check(w.value_text(ts::kCutoff, 1.0) == (*direct)->value_text(ts::kCutoff, 1.0), "value_text through the worker");

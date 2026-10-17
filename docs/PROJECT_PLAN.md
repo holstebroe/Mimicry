@@ -29,7 +29,7 @@ Optimizer techniques come from Acidus (`tools/calibrate_reference.py`, `tools/fi
 
 ```
 git submodule update --init                       # clap
-cmake -B build -DCMAKE_BUILD_TYPE=Release         # VST3 SDK fetched, or -DVST3_SDK_ROOT=... (not yet wired, WP1.7)
+cmake -B build -DCMAKE_BUILD_TYPE=Release         # VST3 SDK fetched, or -DVST3_SDK_ROOT=... 
 cmake --build build -j
 ctest --test-dir build
 build/mimicry list path/to/plugin.clap            # or plugin.vst3 (target; commands are stubs today)
@@ -41,22 +41,22 @@ build/mimicry fit --plugin path/to/plugin.vst3 --wav target.wav --minutes 20
 ### WP0 — Bootstrap
 | ID | Issue | Status |
 | --- | --- | --- |
-| 0.1 | CMake project, C++20, `clap` submodule, VST3 SDK fetch / `VST3_SDK_ROOT`, `MIMICRY_VST3_HOSTING` option, IPO in Release, CI (Linux/Windows/macOS) | 🟡 skeleton builds on GCC 13; CI workflow written, Windows/macOS unverified until first push; SDK fetch comes with 1.7 |
+| 0.1 | CMake project, C++20, `clap` submodule, VST3 SDK fetch / `VST3_SDK_ROOT`, `MIMICRY_VST3_HOSTING` option, IPO in Release, CI (Linux/Windows/macOS) | 🟡 builds and tests on Linux/GCC 13 (VST3 SDK v3.8.0 fetched by `cmake/Vst3Sdk.cmake`); Windows/macOS CI unverified until first push |
 | 0.2 | `CLAUDE.md`, evidence-tag conventions | ✅ |
-| 0.3 | Core utilities: Json, Wav, Fft, Rng | ⬜ |
+| 0.3 | Core utilities: Json, Wav, Fft, Rng | ✅ `src/core`, tested by `mimicry_core_test` |
 
 ### WP1 — Host and worker (spec 02, 05 §1)
 | ID | Issue | Status |
 | --- | --- | --- |
-| 1.1 | `PluginHost` interface, `ParamDesc`, `Job`, outcome codes, format selection by extension | 🟡 interface skeleton, `Outcome`, `format_from_path`; `open()` returns an error |
-| 1.2 | CLAP backend: loader, host API, thread-check, instance lifecycle | ⬜ |
-| 1.3 | Parameter enumeration with units from value text (both backends) | ⬜ |
-| 1.4 | Shared render core: events, settle, notes, tail, output checks | ⬜ |
-| 1.5 | Worker process, shared-memory audio, supervisor pool, watchdog | ⬜ (worker is a stub) |
-| 1.6 | `mimicry_test_synth` (CLAP) and `mimicry_test_synth_vst3` (clap-wrapper) with planted hazards | 🟡 CLAP stub with empty factory only; clap-wrapper (holstebroe/clap-wrapper, branch vst3-midi-out) not yet added |
-| 1.7 | **VST3 backend**: SDK hosting module loading, component + controller + connection, host classes, `ProcessData`, parameter changes, event list, offline setup | ⬜ |
-| 1.8 | VST3 state (component + controller), program lists, program-change pinning, restart requests, tail/latency | ⬜ |
-| 1.9 | Main-thread message pump in the worker (Win32 / macOS / Linux) | ⬜ |
+| 1.1 | `PluginHost` interface, `ParamDesc`, `Job`, outcome codes, format selection by extension | ✅ interface in `PluginHost.hpp`; backends implement `Engine` (`Engine.hpp`) |
+| 1.2 | CLAP backend: loader, host API, thread-check, instance lifecycle | ✅ `host/clap/ClapEngine.cpp` (params, state, tail, latency, note expression tuning, log, thread-check); Windows/macOS loader paths unverified |
+| 1.3 | Parameter enumeration with units from value text (both backends) | ✅ `ParamUtil`; texts at 0/25/50/75/100 %, units, log decision, program-change heuristic |
+| 1.4 | Shared render core: events, settle, notes, tail, output checks | ✅ `host/Renderer.cpp` (reset per render, pinned bypass/program, checks of spec 05 section 2, restart handling) |
+| 1.5 | Worker process, shared-memory audio, supervisor pool, watchdog | 🟡 POSIX done and tested (`WorkerClient`, `WorkerPool`, recycling, T7 with 300 crashes + hangs); Windows returns an error |
+| 1.6 | `mimicry_test_synth` (CLAP) and `mimicry_test_synth_vst3` (clap-wrapper) with planted hazards | ✅ both; the VST3 build is a separate project (`src/tests/test_synth_vst3`) via ExternalProject. Hazards: NaN, null deref (A>0.8 && B>0.9), hang, poison, random LFO phase, program, restart. Open: T16-style checks for the restart/program parameters |
+| 1.7 | **VST3 backend**: SDK hosting module loading, component + controller + connection, host classes, `ProcessData`, parameter changes, event list, offline setup | ✅ `host/vst3/Vst3Engine.cpp` on the SDK hosting classes; T13 equivalence passes against the clap-wrapper build. Real third-party VST3 plugins not yet tried (OQ5) |
+| 1.8 | VST3 state (component + controller), program lists, program-change pinning, restart requests, tail/latency | 🟡 state, pinning (flag or name heuristic), restart/rescan, tail, latency done; program lists (`IUnitInfo`) open |
+| 1.9 | Main-thread message pump in the worker (Win32 / macOS / Linux) | 🟡 `MessagePump` + 10 ms idle pump in the worker; Win32 and macOS run-loop code written but unbuilt/unverified |
 
 ### WP2 — Features and loss (spec 03)
 | ID | Issue | Status |
@@ -106,10 +106,10 @@ build/mimicry fit --plugin path/to/plugin.vst3 --wav target.wav --minutes 20
 | --- | --- | --- |
 | 6.1 | `best.state`, `best.params.json`, `match.wav`, `ab.wav`, `report.md`, `diff.ppm` | ⬜ |
 | 6.2 | Holdout and `mimicry eval` | ⬜ |
-| 6.3 | Tests T1-T12 | 🟡 smoke test only (outcomes, severity, format detection) |
+| 6.3 | Tests T1-T12 | 🟡 smoke, core, host (T1 T2 T3 T9 partly), worker (T1 via worker, T7, T9), T13 equivalence |
 | 6.4 | `mimicry rehearse` round trip | ⬜ |
 | 6.5 | `.vstpreset` writer and round-trip test (T14) | ⬜ |
-| 6.6 | Backend equivalence, cross-format transfer, VST3 specifics (T13, T15, T16) | ⬜ |
+| 6.6 | Backend equivalence, cross-format transfer, VST3 specifics (T13, T15, T16) | 🟡 T13 done; T15, T16 open |
 
 ### WP7 — Later
 | ID | Issue | Status |
@@ -138,7 +138,7 @@ built and tested against both formats from the start.
 | OQ4 | Resolved: `.vstpreset` export is in scope (WP5.8, WP6.5). Open detail: wrapper-state round trip across clap-wrapper versions | 🔬 |
 | OQ5 | Plugins that need a message loop, window or licence dialog to initialise (mostly third-party VST3): how far does the minimal main-thread pump get us? Measure on real plugins (WP1.9, WP4.6) | 🔬 |
 | OQ6 | Whether `ImageFeatures` is extracted into a shared header with the image-seeded synth | 🔬 |
-| OQ7 | VST3 SDK: licence of the fetched version, and that its hosting sources build cleanly under C++20 on MSVC, GCC and Clang | 🔬 |
+| OQ7 | Resolved for GCC 13: SDK v3.8.0 is MIT licensed and its hosting sources build under C++20. Open: MSVC and AppleClang (CI) | 🔬 |
 | OQ8 | VST3 offline processing mode vs realtime: how many real plugins sound different, and should the fit offer `--realtime-mode`? | 🔬 |
 | OQ9 | VST3 coordinate: native normalised is the default (02 §1); does the probe show plugins with tapers bad enough to need a re-mapped coordinate? | 🔬 |
 | OQ10 | Resolved: baseline lowered to C++20 with an `expected` shim (see decision log); Clang 18 + libstdc++ 13 no longer blocked. Open detail: verify on MSVC and AppleClang once CI has run | 🔬 |
@@ -162,3 +162,10 @@ built and tested against both formats from the start.
   `mimicry_worker`, CLAP test synth stub, smoke test), `clap` submodule, CI workflow for Linux/Windows/macOS,
   `CLAUDE.md`, and the spec copied into `docs/`. Verified locally with GCC 13 (0 warnings, smoke test passes);
   Windows/macOS CI not yet run. Spec 01 §3 compiler baseline corrected.
+- 2026-10-17: WP0.3 core utilities (Rng, Json, Wav, Fft) with `mimicry_core_test`.
+- 2026-10-17: WP1 host layer. `Engine` (per-format primitive) + `Renderer` (shared render core) + CLAP backend + VST3 backend
+  on the SDK's hosting classes (SDK v3.8.0 fetched by `cmake/Vst3Sdk.cmake`, MIT). Test synth with planted hazards built as CLAP
+  and, through clap-wrapper (pinned commit of holstebroe/clap-wrapper vst3-midi-out), as VST3. Worker process and supervisor
+  (`WorkerClient`, `WorkerPool`): line-framed JSON on descriptors 3/4, anonymous shared memory on 5, watchdog, respawn, recycling.
+  `ctest`: smoke, core, host_clap, host_vst3, equivalence_clap_vst3 (T13), worker_clap, worker_vst3 (T7/T9). Verified on Linux/GCC 13
+  only; Windows isolation not implemented, Win32/macOS code paths unbuilt.
