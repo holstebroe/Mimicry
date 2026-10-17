@@ -49,10 +49,28 @@ target_compile_definitions(mimicry_core PUBLIC MIMICRY_VERSION=\"${PROJECT_VERSI
 mimicry_warnings(mimicry_core)
 
 add_library(mimicry_host STATIC
+    src/host/FileHash.cpp
+    src/host/MessagePump.cpp
+    src/host/ParamUtil.cpp
     src/host/PluginHost.cpp
+    src/host/Renderer.cpp
+    src/host/vst3/Vst3Engine.cpp
 )
-target_link_libraries(mimicry_host PUBLIC mimicry_core)
+find_package(Threads REQUIRED)
+target_link_libraries(mimicry_host PUBLIC mimicry_core Threads::Threads ${CMAKE_DL_LIBS})
+if(APPLE)
+    target_link_libraries(mimicry_host PUBLIC "-framework CoreFoundation")
+endif()
 mimicry_warnings(mimicry_host)
+
+# CLAP backend: needs the clap submodule headers (git submodule update --init).
+if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/clap/include/clap/clap.h)
+    target_sources(mimicry_host PRIVATE src/host/clap/ClapEngine.cpp src/host/clap/SharedLibrary.cpp)
+    target_include_directories(mimicry_host PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/clap/include)
+else()
+    message(WARNING "clap submodule not found: CLAP hosting is disabled (git submodule update --init)")
+    target_sources(mimicry_host PRIVATE src/host/clap/ClapEngineStub.cpp)
+endif()
 
 # --- Executables -------------------------------------------------------------------------------
 
@@ -96,4 +114,13 @@ if(MIMICRY_BUILD_TESTS)
     target_link_libraries(mimicry_core_test PRIVATE mimicry_core)
     mimicry_warnings(mimicry_core_test)
     add_test(NAME core COMMAND mimicry_core_test)
+
+    if(TARGET mimicry_test_synth)
+        add_executable(mimicry_host_test src/tests/host_test_main.cpp)
+        target_link_libraries(mimicry_host_test PRIVATE mimicry_host mimicry_core)
+        target_include_directories(mimicry_host_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+        mimicry_warnings(mimicry_host_test)
+        add_dependencies(mimicry_host_test mimicry_test_synth)
+        add_test(NAME host_clap COMMAND mimicry_host_test $<TARGET_FILE:mimicry_test_synth>)
+    endif()
 endif()

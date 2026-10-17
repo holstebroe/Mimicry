@@ -2,9 +2,11 @@
 // Format-agnostic plugin host interface (docs/spec/02_HOSTING.md section 1).
 //
 // CLAP and VST3 are peers behind this interface. Nothing outside src/host/clap and src/host/vst3 may
-// include a CLAP or VST3 header (CLAUDE.md rule 3). This is the first skeleton of the interface: the
-// backends (WP1.2 CLAP, WP1.7 VST3) fill it in.
+// include a CLAP or VST3 header (CLAUDE.md rule 3). The backends implement the smaller `Engine`
+// interface (host/Engine.hpp); the shared render core (host/Renderer.hpp) turns an Engine into an
+// Instance, so the render loop, settle, tail and output checks are written once for both formats.
 
+#include <array>
 #include <cstdint>
 #include <filesystem>
 #include <memory>
@@ -40,8 +42,13 @@ struct ParamDesc {
     std::string name;
     std::string module;        // CLAP module path / VST3 unit chain
     std::string units;         // from the plugin's own value text
-    int steps = 0;             // 0 = continuous
-    double default_coord = 0;  // in the Mimicry coordinate (spec 02 section 1)
+    int steps = 0;             // 0 = continuous, else the number of distinct values
+    double min = 0;            // plain range (CLAP) or 0..1 (VST3 normalised)
+    double max = 1;
+    double default_plain = 0;
+    bool log_scale = false;    // decode u logarithmically (CLAP only, spec 04 section 1)
+    double default_coord = 0;  // in the Mimicry coordinate u in [0,1] (spec 02 section 1)
+    std::array<std::string, 5> texts;  // the plugin's own value text at 0, 25, 50, 75, 100 %
     ParamFlags flags;
 };
 
@@ -68,13 +75,19 @@ struct Note {
 };
 
 // A render job: the FULL parameter vector, never a delta (CLAUDE.md rule 5).
+//
+// `coords` has one entry per parameter of `Instance::parameters()`, in that order. The render core
+// ignores the entries of read-only parameters and forces bypass and program-change parameters to
+// their default, so a candidate can never mute the plugin or overwrite its own parameters.
 struct Job {
-    std::vector<double> coords;  // one per active parameter, in ParamDesc order
+    std::vector<double> coords;
     std::vector<Note> notes;
     int sample_rate = 48000;
     int block_size = 512;
     double settle_ms = 250;
     double tail_max_ms = 8000;
+    double peak_limit = 50;      // spec 05 section 2 [S: Acidus]
+    bool allow_silent = false;   // the target itself is silent
 };
 
 struct Audio {
@@ -91,15 +104,25 @@ public:
     [[nodiscard]] virtual const std::vector<ParamDesc>& parameters() const = 0;
     [[nodiscard]] virtual std::string value_text(std::uint32_t id, double coord) const = 0;
 
+    // Audio starts at the first note (the settle period is not returned). On a failed output check the
+    // outcome is returned and `last_message()` says why.
     [[nodiscard]] virtual expected<Audio, Outcome> render(const Job& job) = 0;
+    [[nodiscard]] virtual const std::string& last_message() const = 0;
+    [[nodiscard]] virtual int tail_samples() const = 0;
+    [[nodiscard]] virtual int latency_samples() const = 0;
+    // Bumped when the plugin changed its parameter table (VST3 restartComponent, CLAP rescan).
+    [[nodiscard]] virtual std::uint64_t parameters_version() const = 0;
+    // Main thread: lets the plugin run its pending main-thread callbacks and drains the system queue.
+    virtual void pump() = 0;
 
     [[nodiscard]] virtual expected<std::vector<std::uint8_t>, HostError> save_state() = 0;
     [[nodiscard]] virtual expected<void, HostError> load_state(const std::vector<std::uint8_t>& blob) = 0;
     [[nodiscard]] virtual expected<void, HostError> reset() = 0;
 };
 
-// Opens a plugin by path (format from the extension). `uid` picks one plugin of a multi-plugin file.
-// Until the backends exist this always returns an error.
+// Opens a plugin by path (format from the extension) in THIS process. `uid` picks one plugin of a
+// multi-plugin file. Only the worker (and debugging tools) call this; the supervisor goes through
+// src/supervisor, which runs it in a worker process (CLAUDE.md rule 4).
 [[nodiscard]] expected<std::unique_ptr<Instance>, HostError> open(const std::filesystem::path& path,
                                                                         std::string_view uid = {});
 
