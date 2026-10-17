@@ -17,7 +17,7 @@ Optimizer techniques come from Acidus (`tools/calibrate_reference.py`, `tools/fi
 
 | Doc | Content |
 | --- | --- |
-| `spec/01_ARCHITECTURE.md` | Product shape, formats, constraints (CMake, C++23), processes, layout, commands, plugin profile |
+| `spec/01_ARCHITECTURE.md` | Product shape, formats, constraints (CMake, C++20), processes, layout, commands, plugin profile |
 | `spec/02_HOSTING.md` | `PluginHost` interface, CLAP and VST3 backends, concept mapping, threads, parameters, render loop, state, build |
 | `spec/03_FEATURES_LOSS.md` | Features, weights, level, noise floor, cost |
 | `spec/04_OPTIMIZER.md` | Encoding, semantics, probe, stage pipeline, CMA-ES, diversity, fingerprint, mapping |
@@ -41,7 +41,7 @@ build/mimicry fit --plugin path/to/plugin.vst3 --wav target.wav --minutes 20
 ### WP0 — Bootstrap
 | ID | Issue | Status |
 | --- | --- | --- |
-| 0.1 | CMake project, C++23, `clap` submodule, VST3 SDK fetch / `VST3_SDK_ROOT`, `MIMICRY_VST3_HOSTING` option, IPO in Release, CI (Linux/Windows/macOS) | 🟡 skeleton builds on GCC 13; CI workflow written, Windows/macOS unverified until first push; SDK fetch comes with 1.7 |
+| 0.1 | CMake project, C++20, `clap` submodule, VST3 SDK fetch / `VST3_SDK_ROOT`, `MIMICRY_VST3_HOSTING` option, IPO in Release, CI (Linux/Windows/macOS) | 🟡 skeleton builds on GCC 13; CI workflow written, Windows/macOS unverified until first push; SDK fetch comes with 1.7 |
 | 0.2 | `CLAUDE.md`, evidence-tag conventions | ✅ |
 | 0.3 | Core utilities: Json, Wav, Fft, Rng | ⬜ |
 
@@ -138,10 +138,10 @@ built and tested against both formats from the start.
 | OQ4 | Resolved: `.vstpreset` export is in scope (WP5.8, WP6.5). Open detail: wrapper-state round trip across clap-wrapper versions | 🔬 |
 | OQ5 | Plugins that need a message loop, window or licence dialog to initialise (mostly third-party VST3): how far does the minimal main-thread pump get us? Measure on real plugins (WP1.9, WP4.6) | 🔬 |
 | OQ6 | Whether `ImageFeatures` is extracted into a shared header with the image-seeded synth | 🔬 |
-| OQ7 | VST3 SDK: licence of the fetched version, and that its hosting sources build cleanly under C++23 on MSVC, GCC and Clang | 🔬 |
+| OQ7 | VST3 SDK: licence of the fetched version, and that its hosting sources build cleanly under C++20 on MSVC, GCC and Clang | 🔬 |
 | OQ8 | VST3 offline processing mode vs realtime: how many real plugins sound different, and should the fit offer `--realtime-mode`? | 🔬 |
 | OQ9 | VST3 coordinate: native normalised is the default (02 §1); does the probe show plugins with tapers bad enough to need a re-mapped coordinate? | 🔬 |
-| OQ10 | Compiler baseline: `std::expected` rules out Clang < 19 with libstdc++ (found with Clang 18 + libstdc++ 13). Keep the baseline in 01 §3, or add a fallback `expected` shim? | 🔬 |
+| OQ10 | Resolved: baseline lowered to C++20 with an `expected` shim (see decision log); Clang 18 + libstdc++ 13 no longer blocked. Open detail: verify on MSVC and AppleClang once CI has run | 🔬 |
 
 ## Decision log
 
@@ -150,13 +150,15 @@ built and tested against both formats from the start.
 | 2026-10-17 | Tool, not plugin; offline; processes for isolation; C++23 (not "C++22"), CMake >= 3.21; no frameworks; own CMA-ES port from Acidus |
 | 2026-10-17 | **CLAP and VST3 are both first-class hosted formats** behind one `PluginHost` interface; any source format can be matched by any target format; VST3 hosting moved from "later" into WP1, scheduled right after the first working CLAP fit; the test synth is built as CLAP and VST3 (clap-wrapper) so both backends are tested against the same code; VST2, AU, LV2 out of scope for now |
 | 2026-10-17 | `std::format` instead of `std::print` until the CI baseline has it (GCC 14); `std::expected` stays and sets the Clang baseline (OQ10) |
+| 2026-10-17 | **C++20 instead of C++23** (owner: newer standard not important). `std::expected` is replaced by `mimicry::expected` (shim, aliases std when available); C++23 still builds. Supersedes the C++23 and `std::expected` decisions above |
 | 2026-10-17 | License MIT (kept from the initial repo commit) |
 
 ## Progress log
 
 - 2026-10-17: Specification written (this document set). No code yet.
 - 2026-10-17: Specs updated for VST3 hosting: 01, 02 (rewritten around `PluginHost`), 05 §9, 06, 07 (T13-T16, `.vstpreset`), this plan.
-- 2026-10-17: Repository initialised: C++23 CMake skeleton (`mimicry_core`, `mimicry_host`, `mimicry`,
+- 2026-10-17: Standard lowered to C++20 with `src/core/Expected.hpp`; builds and passes smoke test on GCC 13 in both C++20 and C++23 modes; spec 01 §3, CLAUDE.md, README updated.
+- 2026-10-17: Repository initialised: CMake skeleton (`mimicry_core`, `mimicry_host`, `mimicry`,
   `mimicry_worker`, CLAP test synth stub, smoke test), `clap` submodule, CI workflow for Linux/Windows/macOS,
   `CLAUDE.md`, and the spec copied into `docs/`. Verified locally with GCC 13 (0 warnings, smoke test passes);
   Windows/macOS CI not yet run. Spec 01 §3 compiler baseline corrected.

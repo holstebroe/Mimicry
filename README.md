@@ -1,7 +1,7 @@
 # Mimicry
 
 Offline tool that hosts a CLAP or VST3 plugin and uses a non-linear optimizer to find the preset that
-matches a WAV, an image, or another plugin's preset. C++23, CMake, no frameworks.
+matches a WAV, an image, or another plugin's preset. C++20, CMake, no frameworks.
 
 **Status: skeleton.** The specification and plan are written (`docs/`), the build runs, and the
 command line prints its interface. Hosting, rendering and optimisation are not implemented yet: see
@@ -31,9 +31,8 @@ ctest --test-dir build
 build/mimicry --help
 ```
 
-Needs CMake 3.21 or newer and a C++23 compiler with `std::expected`: MSVC 19.40 (VS 2022 17.10), GCC 13,
-or Clang with libc++ 17 (AppleClang 15). Clang with libstdc++ needs Clang 19 (older Clang cannot use
-libstdc++'s `std::expected`). If the clap submodule is missing, run `git submodule update --init`. The VST3 SDK is fetched at configure time (or
+Needs CMake 3.21 or newer and a C++20 compiler with `<format>`: MSVC 19.37 (VS 2022 17.7), GCC 13, or
+Clang 17+ (AppleClang 15). C++23 also builds (`-DCMAKE_CXX_STANDARD=23`). If the clap submodule is missing, run `git submodule update --init`. The VST3 SDK is fetched at configure time (or
 taken from `-DVST3_SDK_ROOT=...`) once the VST3 backend lands (WP1.7).
 
 ## Layout

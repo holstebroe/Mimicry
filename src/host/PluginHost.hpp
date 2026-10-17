@@ -6,13 +6,13 @@
 // backends (WP1.2 CLAP, WP1.7 VST3) fill it in.
 
 #include <cstdint>
-#include <expected>
 #include <filesystem>
 #include <memory>
 #include <string>
 #include <string_view>
 #include <vector>
 
+#include "core/Expected.hpp"
 #include "core/Outcome.hpp"
 
 namespace mimicry::host {
@@ -23,7 +23,7 @@ enum class PluginFormat { Clap, Vst3 };
 
 // Format from the file name: ".clap" or ".vst3" (case-insensitive; a trailing separator is fine, since
 // a .vst3 is a bundle directory on Linux and macOS).
-[[nodiscard]] std::expected<PluginFormat, std::string> format_from_path(const std::filesystem::path& path);
+[[nodiscard]] expected<PluginFormat, std::string> format_from_path(const std::filesystem::path& path);
 
 enum class PluginKind { Instrument, Effect, Unknown };
 
@@ -91,16 +91,16 @@ public:
     [[nodiscard]] virtual const std::vector<ParamDesc>& parameters() const = 0;
     [[nodiscard]] virtual std::string value_text(std::uint32_t id, double coord) const = 0;
 
-    [[nodiscard]] virtual std::expected<Audio, Outcome> render(const Job& job) = 0;
+    [[nodiscard]] virtual expected<Audio, Outcome> render(const Job& job) = 0;
 
-    [[nodiscard]] virtual std::expected<std::vector<std::uint8_t>, HostError> save_state() = 0;
-    [[nodiscard]] virtual std::expected<void, HostError> load_state(const std::vector<std::uint8_t>& blob) = 0;
-    [[nodiscard]] virtual std::expected<void, HostError> reset() = 0;
+    [[nodiscard]] virtual expected<std::vector<std::uint8_t>, HostError> save_state() = 0;
+    [[nodiscard]] virtual expected<void, HostError> load_state(const std::vector<std::uint8_t>& blob) = 0;
+    [[nodiscard]] virtual expected<void, HostError> reset() = 0;
 };
 
 // Opens a plugin by path (format from the extension). `uid` picks one plugin of a multi-plugin file.
 // Until the backends exist this always returns an error.
-[[nodiscard]] std::expected<std::unique_ptr<Instance>, HostError> open(const std::filesystem::path& path,
+[[nodiscard]] expected<std::unique_ptr<Instance>, HostError> open(const std::filesystem::path& path,
                                                                         std::string_view uid = {});
 
 }  // namespace mimicry::host

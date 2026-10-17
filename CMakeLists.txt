@@ -1,8 +1,10 @@
 cmake_minimum_required(VERSION 3.21)
 project(Mimicry VERSION 0.1.0 LANGUAGES C CXX)
 
-# C++23 (docs/spec/01_ARCHITECTURE.md section 3). CMake >= 3.21 knows about it for all three compilers.
-set(CMAKE_CXX_STANDARD 23)
+# C++20 (docs/spec/01_ARCHITECTURE.md section 3). std::expected is shimmed in src/core/Expected.hpp.
+if(NOT CMAKE_CXX_STANDARD)
+    set(CMAKE_CXX_STANDARD 20)
+endif()
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)

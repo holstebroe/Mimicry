@@ -1,7 +1,7 @@
 # Development guidelines (humans and AI agents)
 
 Mimicry hosts a CLAP or VST3 plugin offline and optimises its parameters to match a WAV, an image, or
-another plugin's preset (in any format combination). C++23, CMake, no third-party frameworks (same
+another plugin's preset (in any format combination). C++20, CMake, no third-party frameworks (same
 spirit as Acidus/Tannhauser). The VST3 SDK is the one required third-party dependency.
 
 ## Where things are
@@ -16,7 +16,8 @@ spirit as Acidus/Tannhauser). The VST3 SDK is the one required third-party depen
 
 ## Rules
 
-1. C++23 (`CMAKE_CXX_STANDARD 23`, CMake >= 3.21). Use `std::expected` for fallible calls; no
+1. C++20 (`CMAKE_CXX_STANDARD 20`, CMake >= 3.21); C++23 also builds. Use `mimicry::expected`
+   (`src/core/Expected.hpp`, std::expected when available) for fallible calls; no
    exceptions across the host/plugin boundary and none on the render path.
 2. No JUCE or other frameworks. A new dependency needs an entry in the plan's open questions first.
 3. CLAP and VST3 are peers. Format-specific code lives only in `src/host/clap/` and `src/host/vst3/`

@@ -24,11 +24,13 @@ format can be matched by any target format. Out of scope: VST2, AU, LV2 (a backe
 
 ## 3. Constraints (project rules)
 
-- CMake, **C++23** [D: the standard is C++23; "C++22" does not exist]. `CMAKE_CXX_STANDARD 23`
-  needs CMake >= 3.21. Compiler baseline [S: checked on GCC 13.3, where Clang 18 + libstdc++ 13 fails]:
-  MSVC 19.40 (VS 2022 17.10), GCC 13, Clang 19 with libstdc++, or Clang 17 with libc++ (AppleClang 15).
-  `std::expected` is the limiting feature: older Clang cannot use libstdc++'s. `std::print` needs
-  GCC 14, so code uses `std::format` until the baseline moves.
+- CMake, **C++20** [D: the owner does not need C++23 and an older standard is easier to build on;
+  "C++22" does not exist]. `CMAKE_CXX_STANDARD` defaults to 20 and `-DCMAKE_CXX_STANDARD=23` also
+  builds (both checked on GCC 13.3). CMake >= 3.21. Compiler baseline [I]: MSVC 19.37 (VS 2022 17.7),
+  GCC 13, Clang 17 or newer (libc++ or libstdc++ 13), AppleClang 15 — driven by `std::format`.
+  `std::expected` is C++23, so `mimicry::expected` (`src/core/Expected.hpp`) is a small shim with
+  the same call-site API that aliases `std::expected` when the library has it. `std::print` is not
+  used.
 - No JUCE or other frameworks. Small leaf dependencies need an explicit decision (see plan,
   open questions): the plan is own WAV, FFT, JSON and PPM code. The **VST3 SDK** is the one required
   third-party code, as the format's own interface definition and hosting classes; it is fetched at
@@ -36,9 +38,9 @@ format can be matched by any target format. Out of scope: VST2, AU, LV2 (a backe
 - CLAP headers via the `clap` submodule, as in Acidus/Tannhauser [S].
 - The existing repos stay on C++17 [S: both `CMakeLists.txt`]; Mimicry shares no compiled code with
   them. Anything copied back (e.g. feature extractors) must stay C++17-compatible. The VST3 SDK sources
-  must build under C++23 in CI (plan, OQ7).
-- Language features to use: `std::expected` for fallible calls, `std::span`, `std::jthread` /
-  `std::stop_token`, `std::format` (`std::print` once the baseline allows), ranges. No exceptions
+  must build under C++20 in CI (plan, OQ7).
+- Language features to use: `mimicry::expected` for fallible calls, `std::span`, `std::jthread` /
+  `std::stop_token`, `std::format`, ranges (all C++20). No exceptions
   across the host/plugin boundary and none on the render path (plugin-thrown exceptions are caught at
   the worker boundary).
 
