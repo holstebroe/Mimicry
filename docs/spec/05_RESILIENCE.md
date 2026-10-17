@@ -8,7 +8,7 @@ here applies to CLAP and VST3 plugins alike; §9 lists the format-specific parts
 ## 1. Isolation
 
 All rendering happens in `mimicry_worker` processes. The supervisor:
-- sends jobs over a pipe/socket and receives audio through shared memory (no audio on the pipe);
+- sends jobs over a pipe and receives audio through shared memory (no audio on the pipe). Implemented as one JSON object per line on inherited descriptors 3 (to the worker) and 4 (from it), and anonymous shared memory on descriptor 5 (unlinked at creation, so nothing leaks) that also carries state blobs [A];
 - applies a **per-job wall-clock timeout**, default `max(5 s, 20 × audio duration)` [D];
 - on timeout or process exit, kills the worker (SIGKILL / `TerminateProcess`), reaps it, releases the
   shared memory, respawns, and scores the candidate as `Timeout` or `Crash`;

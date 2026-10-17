@@ -28,3 +28,4 @@ CMakeUserPresets.json
 .vscode/
 .idea/
 .cache/
+build/
