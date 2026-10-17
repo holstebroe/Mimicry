@@ -39,7 +39,10 @@ endfunction()
 # --- Libraries ---------------------------------------------------------------------------------
 
 add_library(mimicry_core STATIC
+    src/core/Fft.cpp
+    src/core/Json.cpp
     src/core/Outcome.cpp
+    src/core/Wav.cpp
 )
 target_include_directories(mimicry_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
 target_compile_definitions(mimicry_core PUBLIC MIMICRY_VERSION=\"${PROJECT_VERSION}\")
@@ -88,4 +91,9 @@ if(MIMICRY_BUILD_TESTS)
     target_link_libraries(mimicry_smoke_test PRIVATE mimicry_host mimicry_core)
     mimicry_warnings(mimicry_smoke_test)
     add_test(NAME smoke COMMAND mimicry_smoke_test)
+
+    add_executable(mimicry_core_test src/tests/core_test_main.cpp)
+    target_link_libraries(mimicry_core_test PRIVATE mimicry_core)
+    mimicry_warnings(mimicry_core_test)
+    add_test(NAME core COMMAND mimicry_core_test)
 endif()
