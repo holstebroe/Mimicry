@@ -84,6 +84,9 @@ if(MIMICRY_HAVE_VST3)
     target_sources(mimicry_host PRIVATE ${_h}/vst/hosting/plugprovider.cpp ${_h}/common/memorystream.cpp)
     if(WIN32)
         target_sources(mimicry_host PRIVATE ${_h}/vst/hosting/module_win32.cpp)
+        # The SDK assumes u8string() returns std::string; C++20 makes it std::u8string.
+        set_source_files_properties(${_h}/vst/hosting/module_win32.cpp PROPERTIES
+            COMPILE_OPTIONS "/Zc:char8_t-" COMPILE_DEFINITIONS _SILENCE_CXX20_U8PATH_DEPRECATION_WARNING)
     elseif(APPLE)
         target_sources(mimicry_host PRIVATE ${_h}/vst/hosting/module_mac.mm)
         set_source_files_properties(${_h}/vst/hosting/module_mac.mm PROPERTIES COMPILE_FLAGS "-fobjc-arc")

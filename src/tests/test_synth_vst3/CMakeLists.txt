@@ -10,6 +10,11 @@ set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 if(NOT CMAKE_BUILD_TYPE)
     set(CMAKE_BUILD_TYPE Release)
 endif()
+if(MSVC AND NOT DEFINED CMAKE_MSVC_RUNTIME_LIBRARY)
+    # clap-wrapper sets a static runtime in its own directory scope only when this is undefined; define
+    # it here so the wrapper libraries and the plugin target (TestSynthClap.cpp) use the same runtime.
+    set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+endif()
 if(APPLE)
     enable_language(OBJCXX)
 endif()
