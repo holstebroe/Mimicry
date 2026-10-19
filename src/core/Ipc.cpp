@@ -1,6 +1,7 @@
 #include "core/Ipc.hpp"
 
 #include <format>
+#include <mutex>
 
 #if !defined(_WIN32)
 #include <fcntl.h>
@@ -153,6 +154,28 @@ Process& Process::operator=(Process&& o) noexcept {
     return *this;
 }
 
+#if !defined(__linux__)
+namespace {
+// Serialises pipe creation and spawning where pipes cannot be made close-on-exec atomically.
+std::mutex& spawn_mutex() {
+    static std::mutex m;
+    return m;
+}
+}  // namespace
+#endif
+
+bool make_cloexec_pipe(int fds[2]) {
+#if defined(__linux__)
+    return ::pipe2(fds, O_CLOEXEC) == 0;
+#else
+    std::lock_guard lock(spawn_mutex());
+    if (::pipe(fds) != 0) return false;
+    ::fcntl(fds[0], F_SETFD, FD_CLOEXEC);
+    ::fcntl(fds[1], F_SETFD, FD_CLOEXEC);
+    return true;
+#endif
+}
+
 expected<Process, std::string> Process::spawn(const std::filesystem::path& exe, const std::vector<std::string>& args,
                                               const std::vector<FdMapping>& fds) {
     // Move every source above the target range first, so no mapping can overwrite another's source.
@@ -180,7 +203,13 @@ expected<Process, std::string> Process::spawn(const std::filesystem::path& exe, 
     argv.push_back(nullptr);
 
     pid_t pid = 0;
-    const int rc = ::posix_spawn(&pid, exe.c_str(), &actions, nullptr, argv.data(), environ);
+    int rc = 0;
+    {
+#if !defined(__linux__)
+        std::lock_guard lock(spawn_mutex());
+#endif
+        rc = ::posix_spawn(&pid, exe.c_str(), &actions, nullptr, argv.data(), environ);
+    }
     posix_spawn_file_actions_destroy(&actions);
     cleanup();
     if (rc != 0) return unexpected(std::format("cannot start '{}': {}", exe.string(), std::strerror(rc)));

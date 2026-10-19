@@ -174,7 +174,10 @@ and `src/opt` use these [D] unless noted:
 - **Probe.** Descriptors per render: centroid, f0 (confidence >= 0.5), peak to −20 dB decay, onset to
   −60 dB tail, flatness, level, embedding. Unit scores: 20 cents, 0.15 octave, 0.25 in log2 time, 1.5 dB;
   f0 changes by a small-integer ratio are estimator jumps, not pitch. Dead: embedding change at most
-  `max(3 · floor, 0.15)`, level within 0.5 dB, pitch within 5 cents, and nothing failed. Otherwise the
+  `max(3 · floor, 0.15)`, level within 0.5 dB, pitch within 5 cents at every value that rendered; values
+  that failed do not keep a parameter alive (a hazard switch that only fails at its top is frozen at its
+  default, which rendered, and its failures stay in the profile) [A: measured, a zero-effect hazard left
+  in the search cost the WP4 test fit 2-3 dB]. Otherwise the
   largest score >= 1 wins (`fx` when the tail grows twice as much as the decay and flatness moves 1.5 dB),
   else `spectrum`. The safe box is the run of good probe values on each side of the default; a
   failure next to the default narrows that side to the default itself [A]. Pairs: the 10

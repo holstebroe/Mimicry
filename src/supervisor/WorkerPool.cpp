@@ -96,8 +96,16 @@ WorkerStats WorkerPool::total_stats() const {
         t.crashes += c->stats().crashes;
         t.timeouts += c->stats().timeouts;
         t.recycled += c->stats().recycled;
+        t.canaries += c->stats().canaries;
+        t.canary_restarts += c->stats().canary_restarts;
     }
     return t;
+}
+
+std::string WorkerPool::table_change() const {
+    for (const auto& c : clients_)
+        if (c && !c->table_change().empty()) return c->table_change();
+    return {};
 }
 
 }  // namespace mimicry::supervisor

@@ -61,7 +61,7 @@ All tests are executables run by `ctest`; DSP-style tests return non-zero on fai
 | T6 | Round trip (`rehearse`): 20 random presets of a test plugin, in each format; recovered loss under 1.5x floor in >= 90 % and normalised parameter error reported per parameter group |
 | T7 | Isolation: 1000 planted crashes/hangs, in each format; supervisor survives, no leaked handles, shared memory or zombies |
 | T8 | Bisection finds the planted constraint (`A > 0.8 && B > 0.9`) with thresholds within 2 %, in each format |
-| T9 | Poisoned state: after a NaN-poisoning combination, the next valid render is correct (canary), in each format |
+| T9 | Poisoned state: after a NaN-poisoning combination, the next valid render is correct (canary), in each format; poison that survives reset and state load fails the canary and restarts the worker |
 | T10 | Output: `ab.wav` layout and levels, `best.state` reloads and reproduces the match, `diff.ppm` valid |
 | T11 | Plugin-to-plugin: Acidus calibration build as source and target with different calibration profiles; recover the profile within tolerance (the Acidus `--rehearse` idea [S]) |
 | T12 | Throughput: renders/s on the reference machine, per format, reported (target: >= 50 evals/s for a light synth on 8 cores [D]) |
@@ -83,6 +83,11 @@ parameter, used by T6-T9: a NaN above a threshold; a null dereference when two p
 a sleep (hang) at one combination; a filter state that stays poisoned after a bad combination; a random
 LFO phase (repeatability floor) with a seed parameter; a program-change parameter and a parameter that
 requests a component restart (for T16). It is also the first thing the host is developed against.
+Three more hazards test spec 05 §5 and §9 [A]: *Hazard Sticky* (NaN for the life of the instance,
+surviving reset, re-activation and state load, so only the canary's worker restart clears it), *Hazard
+Throw* (`process` throws a C++ exception) and the hidden *Hazard Rename* (renames *Hidden Drive* and asks
+for a parameter rescan, so the parameter table changes mid-run). They are appended to the table, so no
+earlier id moves.
 
 For T17 it exposes a small factory bank (CLAP preset discovery, VST3 program list with program data,
 MIDI program change), including one duplicate and one preset that changes nothing. **`mimicry_test_fx`**

@@ -171,8 +171,9 @@ expected<Profile, std::string> probe(const RenderBatch& render, const host::Plug
             mx.emb = std::max(mx.emb, sc[k].emb);
         }
         q.effect = mx.emb / dead_thr;
-        // 3. Classify. Dead: nothing above the floor and nothing failed.
-        if (all_ok && mx.emb <= dead_thr && mx.level * kLevelDb <= 0.5 && mx.pitch * kPitchCents <= 5) {
+        // 3. Classify. Dead: nothing above the floor at any value that rendered. A failing value does not make a
+        // parameter alive: frozen at its default (which rendered) it cannot fail, and its outcomes are kept.
+        if (mx.emb <= dead_thr && mx.level * kLevelDb <= 0.5 && mx.pitch * kPitchCents <= 5) {
             q.measured = ProbeClass::Dead;
         } else {
             struct Cand {

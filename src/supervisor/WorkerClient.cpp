@@ -1,6 +1,7 @@
 #include "supervisor/WorkerClient.hpp"
 
 #include <algorithm>
+#include <atomic>
 #include <cstring>
 #include <format>
 
@@ -24,6 +25,21 @@ double plan_seconds(const host::Job& job) {
     double end_ms = 0;
     for (const auto& n : job.notes) end_ms = std::max({end_ms, n.on_ms, n.off_ms});
     return (job.settle_ms + end_ms) / 1000.0;
+}
+
+// First difference between two parameter tables (id, name, steps, flags), or "" when they agree.
+std::string table_difference(const std::vector<host::ParamDesc>& a, const std::vector<host::ParamDesc>& b) {
+    if (a.size() != b.size()) return std::format("{} parameters became {}", a.size(), b.size());
+    for (std::size_t i = 0; i < a.size(); ++i) {
+        const auto& x = a[i];
+        const auto& y = b[i];
+        if (x.id != y.id || x.name != y.name)
+            return std::format("parameter {} '{}' (id {}) is now '{}' (id {})", i, x.name, x.id, y.name, y.id);
+        if (x.steps != y.steps || x.flags.readonly != y.flags.readonly || x.flags.program_change != y.flags.program_change ||
+            x.flags.bypass != y.flags.bypass)
+            return std::format("parameter '{}' (id {}) changed its steps or flags", x.name, x.id);
+    }
+    return {};
 }
 
 }  // namespace
@@ -79,13 +95,12 @@ expected<void, HostError> WorkerClient::start_worker() {
     auto shm = ipc::SharedMemory::create(options_.shm_bytes);
     if (!shm) return unexpected(HostError{shm.error()});
     int to_worker[2], from_worker[2];
-    if (::pipe(to_worker) != 0) return unexpected(HostError{"pipe failed"});
-    if (::pipe(from_worker) != 0) {
+    if (!ipc::make_cloexec_pipe(to_worker)) return unexpected(HostError{"pipe failed"});
+    if (!ipc::make_cloexec_pipe(from_worker)) {
         ::close(to_worker[0]);
         ::close(to_worker[1]);
         return unexpected(HostError{"pipe failed"});
     }
-    for (const int fd : {to_worker[0], to_worker[1], from_worker[0], from_worker[1]}) ::fcntl(fd, F_SETFD, FD_CLOEXEC);
 
     auto proc = ipc::Process::spawn(options_.worker_exe, {"--serve", "--shm-bytes", std::to_string(options_.shm_bytes)},
                                     {{to_worker[0], 3}, {from_worker[1], 4}, {shm->fd(), 5}});
@@ -124,8 +139,14 @@ expected<void, HostError> WorkerClient::start_worker() {
 void WorkerClient::adopt(const json::Value& d) {
     if (d["info"].is_object()) info_ = host::info_from_json(d["info"]);
     if (d["params"].is_array()) {
-        params_.clear();
-        for (const auto& p : d["params"].as_array()) params_.push_back(host::param_from_json(p));
+        std::vector<host::ParamDesc> now;
+        for (const auto& p : d["params"].as_array()) now.push_back(host::param_from_json(p));
+        if (!have_params_) {
+            params_ = std::move(now);
+            have_params_ = true;
+        } else if (table_change_.empty()) {
+            table_change_ = table_difference(params_, now);
+        }
     }
     tail_ = static_cast<int>(d["tail"].as_number());
     latency_ = static_cast<int>(d["latency"].as_number());
@@ -175,8 +196,36 @@ std::string WorkerClient::value_text(std::uint32_t id, double coord) const {
     return reply["text"].as_string();
 }
 
+std::uint64_t WorkerClient::blocks_done() const {
+    if (payload() == 0) return 0;
+    return std::atomic_ref<std::uint64_t>(*reinterpret_cast<std::uint64_t*>(static_cast<char*>(shm_.data()) + payload())).load();
+}
+
 expected<host::Audio, Outcome> WorkerClient::render(const host::Job& job) {
+    auto r = render_once(job);
+    if (r) {
+        if (options_.canary && (!canary_ || canary_->coords != job.coords)) canary_ = job;
+        return r;
+    }
+    // A crash or timeout already cost the process; any other failure may have poisoned the instance in a way
+    // its reset does not clear, so the last job that passed must pass again (spec 05 section 5).
+    if (!options_.canary || !canary_ || !open_ || !table_change_.empty()) return r;
+    const std::string why = message_;
+    ++stats_.canaries;
+    if (!render_once(*canary_)) {
+        ++stats_.canary_restarts;
+        (void)start_worker();
+    }
+    message_ = why;
+    return r;
+}
+
+expected<host::Audio, Outcome> WorkerClient::render_once(const host::Job& job) {
     message_.clear();
+    if (!table_change_.empty()) {
+        message_ = "the plugin's parameter table changed: " + table_change_;
+        return unexpected(Outcome::HostError);
+    }
     // Recycle the process every N renders, and bring a dead one back (the plugin is re-opened from scratch).
     if (open_ && renders_since_start_ >= options_.recycle_after) {
         ++stats_.recycled;
@@ -197,15 +246,22 @@ expected<host::Audio, Outcome> WorkerClient::render(const host::Job& job) {
     std::string detail;
     switch (call(req, timeout, reply, detail)) {
         case Call::Ok: break;
-        case Call::Timeout:
+        case Call::Timeout: {
             ++stats_.timeouts;
             open_ = false;
-            message_ = std::format("no answer within {:.1f} s: worker killed", timeout);
+            const auto blocks = blocks_done();
+            // Spec 05 section 9: a plugin waiting for a dialog, a licence check or a message loop never
+            // reaches its first block.
+            message_ = blocks == 0 ? std::format("no answer within {:.1f} s: worker killed; the plugin never reached the "
+                                                 "first block (stuck in reset or activation: a dialog, a licence check "
+                                                 "or a missing message loop?)", timeout)
+                                   : std::format("no answer within {:.1f} s: worker killed in block {}", timeout, blocks);
             return unexpected(Outcome::Timeout);
+        }
         case Call::Crashed:
             ++stats_.crashes;
             open_ = false;
-            message_ = std::format("worker died: {}", detail);
+            message_ = std::format("worker died in block {}: {}", blocks_done(), detail);
             return unexpected(Outcome::Crash);
     }
     ++renders_since_start_;
@@ -214,7 +270,24 @@ expected<host::Audio, Outcome> WorkerClient::render(const host::Job& job) {
         return unexpected(Outcome::HostError);
     }
     message_ = reply["message"].as_string();
-    version_ = static_cast<std::uint64_t>(reply["version"].as_number(static_cast<double>(version_)));
+    // A new parameter version (restart request with a rescan): fetch the table and compare it with the
+    // first one. A changed table fails this and every later render (spec 05 section 9).
+    if (const auto v = static_cast<std::uint64_t>(reply["version"].as_number(static_cast<double>(version_))); v != version_) {
+        json::Value dreq, desc;
+        dreq.set("cmd", "describe");
+        std::string ddetail;
+        if (call(dreq, options_.call_timeout_s, desc, ddetail) != Call::Ok) {
+            open_ = false;
+            message_ = "worker lost while re-reading the parameter table: " + ddetail;
+            return unexpected(Outcome::HostError);
+        }
+        if (desc["ok"].as_bool()) adopt(desc);
+        version_ = v;
+        if (!table_change_.empty()) {
+            message_ = "the plugin's parameter table changed: " + table_change_;
+            return unexpected(Outcome::HostError);
+        }
+    }
     auto outcome = host::outcome_from_string(reply["outcome"].as_string());
     if (!outcome) {
         message_ = outcome.error();
@@ -227,7 +300,7 @@ expected<host::Audio, Outcome> WorkerClient::render(const host::Job& job) {
     audio.sample_rate = static_cast<int>(reply["rate"].as_number());
     const auto frames = static_cast<std::size_t>(reply["frames"].as_number());
     const std::size_t count = frames * static_cast<std::size_t>(std::max(audio.channels, 0));
-    if (count * sizeof(float) > shm_.size() || audio.channels < 1) {
+    if (count * sizeof(float) > payload() || audio.channels < 1) {
         message_ = "worker reported more audio than the shared memory holds";
         return unexpected(Outcome::HostError);
     }
@@ -249,13 +322,13 @@ expected<std::vector<std::uint8_t>, HostError> WorkerClient::save_state() {
     }
     if (!reply["ok"].as_bool()) return unexpected(HostError{reply["error"].as_string()});
     const auto n = static_cast<std::size_t>(reply["bytes"].as_number());
-    if (n > shm_.size()) return unexpected(HostError{"bad state size"});
+    if (n > payload()) return unexpected(HostError{"bad state size"});
     const auto* p = static_cast<const std::uint8_t*>(shm_.data());
     return std::vector<std::uint8_t>(p, p + n);
 }
 
 expected<void, HostError> WorkerClient::load_state(const std::vector<std::uint8_t>& blob) {
-    if (blob.size() > shm_.size()) return unexpected(HostError{"state larger than the shared memory"});
+    if (blob.size() > payload()) return unexpected(HostError{"state larger than the shared memory"});
     if (!open_) {
         if (auto r = start_worker(); !r) return unexpected(r.error());
     }

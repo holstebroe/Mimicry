@@ -38,6 +38,9 @@ public:
     [[nodiscard]] std::string value_text(std::uint32_t id, double coord);
 
     [[nodiscard]] WorkerStats total_stats() const;
+    // The first client's parameter-table change (WorkerClient::table_change), "" if none. Call between
+    // batches.
+    [[nodiscard]] std::string table_change() const;
 
 private:
     WorkerPool() = default;

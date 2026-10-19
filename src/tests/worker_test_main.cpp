@@ -1,9 +1,12 @@
-// Isolation tests (T1 through the worker, T7, T9; docs/spec/07_OUTPUT_VALIDATION.md section 4).
+// Isolation tests (T1 through the worker, T7, T9; docs/spec/07_OUTPUT_VALIDATION.md section 4), and the
+// recovery and format handling of spec 05 sections 5 and 9: canary restart after sticky poison, plugin
+// exceptions, the "never reached the first block" diagnosis, and a parameter table that changes mid-run.
 // Usage: mimicry_worker_test <plugin> <mimicry_worker>.
 
 #include <chrono>
 #include <cstdio>
 #include <filesystem>
+#include <format>
 #include <string>
 
 #include "host/PluginHost.hpp"
@@ -107,6 +110,7 @@ int main(int argc, char** argv) {
     auto h = w.render(hang);
     const double hang_s = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
     check(!h && h.error() == Outcome::Timeout, "planted hang is a Timeout");
+    check(w.last_message().find("in block 1") != std::string::npos, "the timeout says where it hung: " + w.last_message());
     check(hang_s < 5.0, "watchdog fires within bounds: " + std::to_string(hang_s));
     check(w.render(job).has_value(), "next render after a timeout works");
 
@@ -122,6 +126,56 @@ int main(int argc, char** argv) {
     check(!w.render(poison).has_value(), "poison hazard fails");
     auto clean = w.render(job);
     check(clean && a && clean->samples == a->samples, "render after poison is clean");
+
+    // Spec 05 section 5: poison that survives reset and state load. The canary (the last job that passed)
+    // fails too, so the worker restarts and the next render is clean.
+    {
+        const auto before = w.stats();
+        auto sticky = job;
+        sticky.coords[ts::kHazSticky] = 1.0;
+        auto r = w.render(sticky);
+        check(!r && r.error() == Outcome::NonFinite, "sticky poison fails");
+        check(w.stats().canaries == before.canaries + 1 && w.stats().canary_restarts == before.canary_restarts + 1,
+              "the canary fails after sticky poison and the worker restarts");
+        auto next = w.render(job);
+        check(next && a && next->samples == a->samples, "render after sticky poison is clean");
+        // Ordinary poison is cleared by the reset: the canary passes, no restart.
+        const auto mid = w.stats();
+        check(!w.render(poison).has_value() && w.stats().canaries == mid.canaries + 1 &&
+                  w.stats().canary_restarts == mid.canary_restarts && w.stats().spawned == mid.spawned,
+              "the canary passes after poison a reset clears");
+    }
+
+    // Spec 05 section 9: a plugin exception is a HostError, and the worker stays up.
+    {
+        const auto before = w.stats();
+        auto thrower = job;
+        thrower.coords[ts::kHazThrow] = 1.0;
+        auto r = w.render(thrower);
+        check(!r && r.error() == Outcome::HostError && w.last_message().find("threw") != std::string::npos,
+              "a plugin exception is a HostError: " + w.last_message());
+        check(w.stats().spawned == before.spawned && w.stats().crashes == before.crashes, "an exception costs no process");
+        auto next = w.render(job);
+        check(next && a && next->samples == a->samples, "render after an exception is clean");
+    }
+
+    // Spec 05 section 9: a restart request that renames a parameter stops the run with a clear error.
+    {
+        auto r = WorkerClient::open(plugin, {}, opt);
+        check(r.has_value(), "open for the table change");
+        if (r) {
+            auto& t = **r;
+            check(t.render(job).has_value() && t.table_change().empty(), "no table change before the rename");
+            auto rename = job;
+            rename.coords[ts::kHazRename] = 1.0;
+            auto x = t.render(rename);
+            check(!x && x.error() == Outcome::HostError && !t.table_change().empty(), "the rename is a table change: " + t.last_message());
+            check(t.table_change().find("Hidden Drive") != std::string::npos, "the change names the parameter: " + t.table_change());
+            auto y = t.render(job);
+            check(!y && y.error() == Outcome::HostError, "every render after a table change fails");
+            check(t.parameters()[ts::kHidden].name == "Hidden Drive", "callers keep the table they indexed into");
+        }
+    }
 
     // T7: many crashes, flat descriptor count, no zombies.
     const int fds_before = open_fds();
@@ -172,6 +226,12 @@ int main(int argc, char** argv) {
                     if (!results[i] || !ref || results[i]->samples != ref->samples) order_ok = false;
                 }
             }
+            if (!order_ok) {
+                std::string got;
+                for (std::size_t i = 0; i < results.size(); ++i)
+                    got += std::format(" {}:{}", i, results[i] ? "Ok" : std::string(to_string(results[i].error())));
+                std::fprintf(stderr, "pool outcomes:%s\n", got.c_str());
+            }
             check(order_ok, "pool results are in job order and equal in-process renders");
             check((*pool)->total_stats().crashes == 4, "pool crash count");
             // Workers respawned after the crashes keep running into the next batch (Linux: the parent-death
@@ -181,6 +241,21 @@ int main(int argc, char** argv) {
             bool all_ok = true;
             for (const auto& r : again) all_ok = all_ok && r.has_value();
             check(all_ok && (*pool)->total_stats().crashes == 4, "respawned pool workers survive the batch that respawned them");
+            // Concurrent respawns: a worker spawned on one pool thread must not inherit another worker's pipe,
+            // or that worker's crash reads as a timeout (no EOF while the copy is open).
+            const auto before = (*pool)->total_stats();
+            std::vector<host::Job> storm;
+            for (int i = 0; i < 64; ++i) {
+                auto j = job;
+                if (i % 2 == 0) make_crash(j);
+                storm.push_back(j);
+            }
+            long crashed = 0;
+            for (int round = 0; round < 4; ++round)
+                for (const auto& r : (*pool)->render_all(storm)) crashed += !r && r.error() == Outcome::Crash;
+            const auto after_storm = (*pool)->total_stats();
+            check(crashed == 128 && after_storm.timeouts == before.timeouts,
+                  std::format("crash storm: {} of 128 crashes, {} timeouts", crashed, after_storm.timeouts - before.timeouts));
         }
     }
 

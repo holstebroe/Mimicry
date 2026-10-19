@@ -90,11 +90,16 @@ Example the test plugin plants (T8): crash when `A > 0.8 && B > 0.9`; the bisect
 
 A filter that blew up can keep NaN state, and the next render of a valid preset then fails.
 
-- After **any** non-`Ok` outcome, the worker resets the instance (`Instance::reset`: the format's
-  stop/deactivate/activate/start sequence, 02 §2), then `load_state` of the clean snapshot taken at
-  start. If a check still fails on a known-good preset (the *canary*, rendered after every failure), the
-  worker restarts.
-- Every N renders (default 500 [D]) the instance is recycled to bound leaks and drift.
+- Every render already starts with the reset sequence (02 §5). After **any** non-`Ok` outcome the render
+  core (`Renderer`) resets the instance again (`Instance::reset`: the format's stop/deactivate/activate/
+  start sequence, 02 §2), then `load_state` of the clean snapshot it took right after the first
+  activation. If a check still fails on a known-good preset (the *canary*, rendered after every failure),
+  the worker restarts. The canary is the last job that rendered `Ok` on that worker [A]; it is not run
+  after `Crash` or `Timeout`, which already replaced the process, nor before the first `Ok` render. The
+  failed candidate keeps its own outcome; the canary only decides whether the process is trusted
+  (`WorkerStats::canaries`, `canary_restarts`) [A].
+- Every N renders (default 500 [D]) the worker process is recycled to bound leaks and drift (both
+  formats: the process holds one instance, so recycling the process recycles the instance).
 - Every candidate starts from the full parameter vector, never a delta (02 §5), so earlier candidates
   cannot leak into later ones through parameters the plugin did not reset.
 
@@ -110,7 +115,17 @@ profile stores it.
 Each distinct failure writes `crashes/<plugin>-<hash>.json` with the format, plugin uid and version
 hash, the full parameter vector (ids and values), note plan, sample rate, block size, outcome, and the
 minimal set `S` once known. `mimicry replay` reproduces it, and the file is what you send to a plugin
-vendor. The run report lists failure counts per outcome and the constraints learned (`result.json`:
+vendor.
+
+Implemented [A]: `fit` writes the reports into its run directory (`<run>/crashes/`), with each value's
+display text and the plugin path. *Distinct* means one report per outcome plus one per bisected minimal
+set; the first example of an outcome is replaced by its bisected explanation when one arrives; `Silent`
+gets none; at most 32 per run [D]. The hash covers format, uid, version, outcome and `S` (or the
+whole vector when `S` is unknown). `mimicry replay <file>` opens the plugin from the report's path
+(`--plugin` overrides) **in-process**, so it can run under a debugger (a crash then takes `mimicry`
+down, which is the point), or in a worker with `--isolated`. It maps the values onto the plugin's
+current table by id and name (rule 7), warns about a different version hash or a missing parameter,
+renders the job and exits 0 when the outcome is reproduced, 3 when not. The run report lists failure counts per outcome and the constraints learned (`result.json`:
 `constraints.learned`, plus counts of bisections, their renders, redrawn samples and skipped seed
 points) [A].
 
@@ -124,11 +139,21 @@ files, user presets, or the plugin's saved state on disk.
 - **VST3** plugins loaded in-process by hosts are the norm, so third-party VST3 plugins are more likely
   than CLAP ones to expect a message loop, a window, or a licence check at start-up. The worker pumps
   a minimal main-thread loop (02 §3) and creates no windows; a plugin that blocks on a dialog is a
-  `Timeout`, and its failure report says it never reached the first block.
+  `Timeout`, and its failure report says it never reached the first block. Mechanism [A]: the last 64
+  bytes of the worker's shared memory hold a progress word that the render core increments as each
+  block starts; after a timeout or crash the supervisor reads it and the message says "never reached
+  the first block" (0) or which block hung. A plugin that hangs while loading fails `open` with "did not
+  finish loading in time".
 - **VST3 restart requests** (`restartComponent`: reload component, parameter titles changed, latency
   changed) are not failures: the worker re-enumerates and re-runs setup, and the supervisor invalidates
   the parameter table for that instance. If the table changes between candidates, the run stops with a
-  clear error rather than mapping stale ids.
+  clear error rather than mapping stale ids. Implemented for both formats [A]: after every render the
+  render core runs pending main-thread callbacks and then any restart request, bumping the parameter
+  version when the rescan changed the table; a worker client that sees a new version re-reads the table
+  and compares it (count, ids, names, steps, read-only/bypass/program flags) with the table of its first
+  open, and so does every re-open after a crash or recycle. A difference fails that render and every
+  later one with `HostError`; `fit` (through the pipeline's `abort`) and `probe` stop with the
+  difference in the message. Callers keep the table they indexed into.
 - **Program-change parameters** (VST3 `kIsProgramChange`, CLAP equivalents): pinned, never searched,
   because a program change would silently overwrite every other parameter mid-job. Preset harvest
   (06 §6) is the one place a program is changed, in its own jobs, and its result is a state blob that
@@ -138,4 +163,6 @@ files, user presets, or the plugin's saved state on disk.
 - **Offline mode**: VST3 is set up in offline processing mode (02 §5); a plugin that behaves differently
   there is flagged by the repeatability probe, which renders in the same mode the fit will use.
 - **C++ exceptions** thrown by a plugin across an interface call are caught per call in the worker and
-  reported as `HostError`; structured faults (SIGSEGV, SEH) still need the process boundary.
+  reported as `HostError`; structured faults (SIGSEGV, SEH) still need the process boundary. The render
+  core guards activate, start, process, state calls and value text; anything else the worker catches
+  around the whole request. An exception costs no process, and the canary still runs after it.

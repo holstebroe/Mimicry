@@ -32,6 +32,11 @@ private:
 
 // Anonymous shared memory. The name is unlinked at creation, so a crash cannot leak it; the worker gets
 // the descriptor by inheritance.
+// The worker's shared memory: payload (audio, state blobs) from offset 0, then a progress area of this
+// many bytes at the end. Word 0 counts the blocks started in the current render, so the supervisor can
+// tell after a timeout whether the plugin ever reached its first block (spec 05 section 9).
+inline constexpr std::size_t kShmProgressBytes = 64;
+
 class SharedMemory {
 public:
     SharedMemory() = default;
@@ -59,6 +64,11 @@ struct FdMapping {
     int from;  // descriptor in this process
     int to;    // descriptor number in the child
 };
+
+// A pipe whose two ends are close-on-exec from the start, so a worker spawned concurrently on another thread
+// cannot inherit them (an inherited write end would hide a dead worker's EOF until the watchdog fires).
+// Linux: pipe2(O_CLOEXEC); elsewhere pipe + FD_CLOEXEC under the lock Process::spawn also takes.
+[[nodiscard]] bool make_cloexec_pipe(int fds[2]);
 
 class Process {
 public:

@@ -1,5 +1,5 @@
 // mimicry: supervisor / command line (docs/spec/01_ARCHITECTURE.md section 6).
-// Implemented: list, probe, fit, fingerprint. The rest are implemented in the order of docs/PROJECT_PLAN.md.
+// Implemented: list, probe, fit, fingerprint, replay. The rest are implemented in the order of docs/PROJECT_PLAN.md.
 // Plugins are only ever loaded in mimicry_worker processes (CLAUDE.md rule 4); --no-isolation renders
 // in-process for debugging.
 
@@ -32,6 +32,8 @@
 #include "opt/Probe.hpp"
 #include "opt/Profile.hpp"
 #include "opt/Space.hpp"
+#include "output/FailureReport.hpp"
+#include "supervisor/WorkerClient.hpp"
 #include "supervisor/WorkerPool.hpp"
 
 namespace {
@@ -54,7 +56,7 @@ constexpr Command kCommands[] = {
     {"fingerprint", "fingerprint <plugin>", "build the random-preset feature database"},
     {"rehearse", "rehearse <plugin>", "round-trip self-test"},
     {"eval", "eval --plugin P --state S --wav T.wav", "score a state without fitting"},
-    {"replay", "replay <crash.json>", "re-run a recorded failure in-process"},
+    {"replay", "replay <crash.json>", "re-run a recorded failure (in-process unless --isolated)"},
 };
 
 void print_usage() {
@@ -78,8 +80,9 @@ fit options:
   --out DIR            run directory root (default: runs)
 
 probe options: --no-pairs      fingerprint options: --count N (2000)
+replay options: --plugin P (default: the path in the report)   --isolated (render in a worker)
 
-<plugin> is a .clap or .vst3 path. transfer, image, rehearse, eval and replay are not implemented yet;
+<plugin> is a .clap or .vst3 path. transfer, image, rehearse and eval are not implemented yet;
 see docs/PROJECT_PLAN.md for the order.
 )";
     std::fputs(text.c_str(), stdout);
@@ -115,7 +118,7 @@ struct Args {
     }
 };
 
-constexpr std::string_view kFlags[] = {"--no-isolation", "--no-prior", "--no-pairs", "--solve-gain"};
+constexpr std::string_view kFlags[] = {"--no-isolation", "--no-prior", "--no-pairs", "--solve-gain", "--isolated"};
 
 Args parse_args(int argc, char** argv, int first) {
     Args a;
@@ -258,6 +261,9 @@ int cmd_probe(const Args& a) {
     std::fputs(std::format("probing {} parameters with {} worker(s)...\n", p.params.size(), p.workers()).c_str(), stdout);
     auto prof = opt::probe(p.batch(), p.info, p.params, po);
     if (!prof) return fail("probe", prof.error());
+    if (p.pool && !p.pool->table_change().empty())
+        return fail("probe", "the plugin changed its parameter table during the probe (" + p.pool->table_change() +
+                                 "); the probe is not valid for either table");
     std::string out;
     for (const auto& e : prof->params) {
         std::string oc;
@@ -410,6 +416,7 @@ int cmd_fit(const Args& a) {
     po.seed = std::uint64_t(a.num("--seed", 1));
     po.prior = !a.has("--no-prior");
     po.constraints = &constraints;
+    if (p.pool) po.abort = [&p] { return !p.pool->table_change().empty(); };
     for (const auto& s : split(a.get("--stages"))) po.stages.push_back(std::atoi(s.c_str()));
     po.log = [](const std::string& s) { std::fputs((s + "\n").c_str(), stdout); };
     po.progress = [](const opt::Progress& pr) {
@@ -433,6 +440,9 @@ int cmd_fit(const Args& a) {
         const auto path = opt::Profile::default_path(profiles_dir(a), p.info);
         if (auto r = out.save(path); !r) std::fputs(std::format("note: {}\n", r.error()).c_str(), stderr);
     }
+    if (res.aborted)
+        return fail("fit", "stopped: the plugin changed its parameter table during the run (" + p.pool->table_change() +
+                               "); ids would no longer mean the same parameters (spec 05 section 9)");
     if (!res.best.eval.ok()) return fail("fit", "no valid candidate was found");
 
     // Run directory (spec 07 section 1).
@@ -467,6 +477,23 @@ int cmd_fit(const Args& a) {
     save_match(res.best, dir / "best");
     fs::rename(dir / "best.wav", dir / "match.wav", ec);
     for (std::size_t i = 0; i < res.top_k.size(); ++i) save_match(res.top_k[i], dir / "top-k" / std::to_string(i + 1));
+
+    // crashes/: one report per distinct failure (spec 05 section 7), replayable with `mimicry replay`.
+    int reports = 0;
+    for (const auto& f : res.failures) {
+        output::FailureReport fr;
+        fr.info = p.info;
+        fr.plugin_path = fs::absolute(plugin_path).string();
+        fr.job = job;
+        fr.job.coords = f.coords;
+        fr.outcome = f.outcome;
+        fr.set_params(p.params);
+        for (std::size_t i = 0; i < fr.params.size(); ++i) fr.params[i].text = text(p.params[i].id, f.coords[i]);
+        for (std::size_t k = 0; k < f.minimal.size(); ++k)
+            fr.minimal.push_back({p.params[f.minimal[k]].id, p.params[f.minimal[k]].name, k < f.threshold.size() ? f.threshold[k] : 0.0});
+        if (auto w = fr.write(dir / "crashes"); w) ++reports;
+        else std::fputs(std::format("note: {}\n", w.error()).c_str(), stderr);
+    }
 
     // ab.wav: target, 0.3 s of silence, match scaled by the solved gain (same scale for both) [S].
     if (auto audio = obj.render(res.best.coords)) {
@@ -530,6 +557,7 @@ int cmd_fit(const Args& a) {
     hz.set("resampled", static_cast<std::int64_t>(res.resampled));
     hz.set("skipped", static_cast<std::int64_t>(res.skipped));
     result.set("constraints", std::move(hz));
+    result.set("failure_reports", static_cast<std::int64_t>(res.failures.size()));
     json::Array topk;
     for (const auto& t : res.top_k) topk.push_back(t.eval.loss);
     result.set("top_k_loss_db", json::Value(std::move(topk)));
@@ -545,9 +573,52 @@ int cmd_fit(const Args& a) {
     if (res.resampled + res.skipped > 0)
         summary += std::format("  {} sample(s) redrawn and {} seed point(s) skipped inside known constraints\n",
                                res.resampled, res.skipped);
+    if (reports) summary += std::format("  {} failure report(s) in crashes/ (mimicry replay <file>)\n", reports);
     summary += "wrote " + dir.string() + " (listen to ab.wav)\n";
     std::fputs(summary.c_str(), stdout);
     return 0;
+}
+
+// Re-runs a failure report (spec 05 section 7). In-process by default, so the plugin can be watched under
+// a debugger (a crash then takes mimicry down: that is the point); --isolated renders in a worker.
+int cmd_replay(const Args& a) {
+    if (a.positional.empty()) return fail("replay", "usage: mimicry replay <crash.json> [--plugin P] [--isolated]");
+    auto report = output::FailureReport::load(a.positional[0]);
+    if (!report) return fail("replay", report.error());
+    const std::string path = a.get("--plugin", report->plugin_path);
+    if (path.empty()) return fail("replay", "the report names no plugin path; pass --plugin");
+    std::unique_ptr<host::Instance> inst;
+    if (a.has("--isolated")) {
+        auto c = supervisor::WorkerClient::open(path, report->info.uid);
+        if (!c) return fail("replay", c.error().message);
+        inst = std::move(*c);
+    } else {
+        auto c = host::open(path, report->info.uid);
+        if (!c) return fail("replay", c.error().message);
+        inst = std::move(*c);
+    }
+    const auto& info = inst->info();
+    if (info.format != report->info.format || info.uid != report->info.uid)
+        return fail("replay", std::format("{} is {} {}, the report is for {} {}", path, host::to_string(info.format), info.uid,
+                                          host::to_string(report->info.format), report->info.uid));
+    if (info.version_hash != report->info.version_hash)
+        std::fputs(std::format("note: plugin version {} differs from the report's {}\n", info.version_hash,
+                               report->info.version_hash).c_str(), stderr);
+    std::vector<std::string> missing;
+    host::Job job = report->job;
+    job.coords = report->coords_for(inst->parameters(), &missing);
+    for (const auto& m : missing) std::fputs(std::format("note: parameter {} is not in this build\n", m).c_str(), stderr);
+    std::string s = std::format("replaying {} on {} {} ({}){}\n", to_string(report->outcome), host::to_string(info.format),
+                                info.name, a.has("--isolated") ? "worker" : "in-process", report->message.empty() ? "" : ": " + report->message);
+    for (const auto& m : report->minimal) s += std::format("  minimal set: {} (id {}) threshold {:.4f}\n", m.name, m.id, m.threshold);
+    std::fputs(s.c_str(), stdout);
+    std::fflush(stdout);
+    const auto r = inst->render(job);
+    const Outcome got = r ? Outcome::Ok : r.error();
+    const bool same = got == report->outcome;
+    std::fputs(std::format("result: {}{} -> {}\n", to_string(got), inst->last_message().empty() ? "" : " (" + inst->last_message() + ")",
+                           same ? "reproduced" : "NOT reproduced").c_str(), stdout);
+    return same ? 0 : 3;
 }
 
 }  // namespace
@@ -571,6 +642,7 @@ int main(int argc, char** argv) {
     if (cmd == "probe") return cmd_probe(args);
     if (cmd == "fit") return cmd_fit(args);
     if (cmd == "fingerprint") return cmd_fingerprint(args);
+    if (cmd == "replay") return cmd_replay(args);
     for (const auto& c : kCommands)
         if (c.name == cmd) return not_implemented(cmd);
     std::fputs(std::format("mimicry: unknown command '{}' (try --help)\n", cmd).c_str(), stderr);

@@ -624,6 +624,21 @@ void test_pipeline() {
     check(cr.resampled + cr.skipped > 0 && ccrashes < crashes,
           std::format("pipeline: constraints avoid crashes ({} -> {}, {} redrawn, {} skipped)", crashes, ccrashes, cr.resampled, cr.skipped));
     check(cr.best.eval.loss < 0.2, "pipeline with constraints still converges (loss " + std::to_string(cr.best.eval.loss) + ")");
+    // Failure examples for the reports (spec 05 section 7): one per outcome and minimal set; the bisected
+    // crash names its parameters.
+    bool explained = false;
+    for (const auto& f : cr.failures) explained = explained || (f.outcome == Outcome::Crash && f.minimal == std::vector<std::size_t>{0, 1});
+    check(explained, "pipeline: the crash example carries its minimal set");
+    check(!nr.failures.empty() && nr.failures.size() == 1 && nr.failures[0].minimal.empty(),
+          "pipeline: without bisection one crash example, no minimal set");
+
+    // abort stops the run between batches (a parameter table that changed, spec 05 section 9).
+    Synthetic aobj(target, 7, 2.0 / 3.0);
+    PipelineOptions ao = po;
+    ao.max_evals = 0;
+    ao.abort = [&aobj] { return aobj.calls >= 300; };
+    const auto ar = run_pipeline(aobj, space, ao);
+    check(ar.aborted && ar.evals < 400 && ar.top_k.empty(), "pipeline: abort stops the run (" + std::to_string(ar.evals) + " evals)");
 
     // Unsupervised: no group stages.
     SpaceOptions uo;

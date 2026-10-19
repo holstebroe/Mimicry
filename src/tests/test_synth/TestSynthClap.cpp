@@ -25,6 +25,7 @@ const clap_plugin_descriptor_t kDescriptor = {
 struct Plugin {
     clap_plugin_t plugin{};
     const clap_host_t* host = nullptr;
+    const clap_host_params_t* host_params = nullptr;
     Synth synth;
     bool processing = false;
 };
@@ -35,7 +36,7 @@ Plugin* self(const clap_plugin_t* p) { return static_cast<Plugin*>(p->plugin_dat
 
 uint32_t params_count(const clap_plugin_t*) { return kParamCount; }
 
-bool params_get_info(const clap_plugin_t*, uint32_t index, clap_param_info_t* out) {
+bool params_get_info(const clap_plugin_t* plugin, uint32_t index, clap_param_info_t* out) {
     if (index >= kParamCount) return false;
     const ParamInfo& p = kParams[index];
     std::memset(out, 0, sizeof *out);
@@ -45,7 +46,7 @@ bool params_get_info(const clap_plugin_t*, uint32_t index, clap_param_info_t* ou
     if (p.hidden) out->flags |= CLAP_PARAM_IS_HIDDEN;
     if (p.readonly) out->flags = CLAP_PARAM_IS_READONLY;
     if (p.bypass) out->flags |= CLAP_PARAM_IS_BYPASS;
-    std::snprintf(out->name, sizeof out->name, "%s", p.name);
+    std::snprintf(out->name, sizeof out->name, "%s", self(plugin)->synth.name(index));
     std::snprintf(out->module, sizeof out->module, "%s", p.module);
     out->min_value = p.min;
     out->max_value = p.max;
@@ -208,6 +209,12 @@ bool plugin_init(const clap_plugin_t* plugin) {
     Plugin& pl = *self(plugin);
     pl.synth.on_restart_request = [&pl] {
         if (pl.host && pl.host->request_restart) pl.host->request_restart(pl.host);
+    };
+    // A rescan belongs on the main thread; the hazard calls it from wherever the value arrives, which both
+    // Mimicry's CLAP host and clap-wrapper handle synchronously.
+    pl.host_params = pl.host ? static_cast<const clap_host_params_t*>(pl.host->get_extension(pl.host, CLAP_EXT_PARAMS)) : nullptr;
+    pl.synth.on_rename = [&pl] {
+        if (pl.host_params && pl.host_params->rescan) pl.host_params->rescan(pl.host, CLAP_PARAM_RESCAN_INFO);
     };
     return true;
 }

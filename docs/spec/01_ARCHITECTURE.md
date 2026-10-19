@@ -81,7 +81,8 @@ src/targets/     WavTarget, PluginTarget, ImageTarget, ProbePlan, ProbeSignals (
 src/opt/         RenderCache, Space (encoding), Objective (render + score), Embedding, Pipeline (stages,
                  restarts, top-K diversity), Probe (sensitivity), Profile, Constraints (failure
                  bisection, constraint store), Fingerprint, Surrogate
-src/output/      Report, AbWav, Ppm, PresetExport (state, params.json, .vstpreset), Svg, DoctorReport
+src/output/      FailureReport, Report, AbWav, Ppm, PresetExport (state, params.json, .vstpreset), Svg,
+                 DoctorReport
 src/app/         main + commands
 src/gui/         (later) Graphics/Font/ModernDraw/window glue taken from Acidus
 src/tests/       unit + integration executables; test_synth/ (hazard plugin, built as CLAP and VST3)

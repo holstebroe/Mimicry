@@ -35,8 +35,10 @@ private:
         return opt_.stages.empty() || std::find(opt_.stages.begin(), opt_.stages.end(), stage) != opt_.stages.end();
     }
     [[nodiscard]] bool global_stop() const {
-        return now() >= opt_.time_cap_s || (opt_.max_evals > 0 && res_.evals >= opt_.max_evals);
+        return now() >= opt_.time_cap_s || (opt_.max_evals > 0 && res_.evals >= opt_.max_evals) || (opt_.abort && opt_.abort());
     }
+    // Keeps a failure for the reports when it is the first of its outcome and minimal set.
+    void keep_failure(const std::vector<double>& coords, Outcome outcome, const BisectResult* bisect = nullptr);
     [[nodiscard]] bool stop(const Budget& b) const {
         return global_stop() || now() >= b.deadline_s || (b.eval_limit > 0 && res_.evals >= b.eval_limit);
     }
@@ -141,7 +143,32 @@ std::vector<Candidate> Runner::evaluate(const std::vector<std::vector<double>>& 
     return out;
 }
 
+void Runner::keep_failure(const std::vector<double>& coords, Outcome outcome, const BisectResult* bisect) {
+    if (outcome == Outcome::Ok || outcome == Outcome::Silent) return;  // Silent: muted, not a hazard
+    auto& list = res_.failures;
+    if (int(list.size()) >= opt_.max_failure_examples) return;
+    std::vector<std::size_t> minimal = bisect ? bisect->minimal : std::vector<std::size_t>{};
+    for (auto& f : list) {
+        if (f.outcome != outcome) continue;
+        if (f.minimal == minimal) return;
+        if (f.minimal.empty() && !minimal.empty()) {  // the first example of this outcome, now explained
+            f.coords = coords;
+            f.minimal = minimal;
+            f.threshold = bisect->threshold;
+            return;
+        }
+    }
+    FailureExample e;
+    e.coords = coords;
+    e.outcome = outcome;
+    e.minimal = std::move(minimal);
+    if (bisect) e.threshold = bisect->threshold;
+    list.push_back(std::move(e));
+}
+
 void Runner::learn(const std::vector<Candidate>& cands) {
+    for (const auto& c : cands)
+        if (!c.eval.ok()) keep_failure(c.coords, c.eval.outcome);
     if (!opt_.constraints) return;
     ConstraintSet& set = *opt_.constraints;
     std::vector<const Candidate*> fresh;
@@ -164,6 +191,7 @@ void Runner::learn(const std::vector<Candidate>& cands) {
                                      to_string(c->eval.outcome)));
             continue;
         }
+        keep_failure(c->coords, c->eval.outcome, &r);
         auto con = make_constraint(r, c->coords, c->eval.outcome, space_.params());
         if (opt_.log)
             opt_.log(std::format("{}: learned {} ({} renders)", stage_, con.describe(), r.renders));
@@ -563,6 +591,12 @@ PipelineResult Runner::run(const std::vector<std::vector<double>>& seeds) {
     if (enabled(6) && !global_stop()) stage_categorical();
     if (enabled(7) && !global_stop()) stage_refine();
     res_.time_capped = now() >= opt_.time_cap_s;
+    res_.aborted = opt_.abort && opt_.abort();
+    if (res_.aborted) {
+        res_.best = best_;
+        res_.seconds = now();
+        return std::move(res_);
+    }
     select_top_k();
     res_.best = best_;
     res_.seconds = now();

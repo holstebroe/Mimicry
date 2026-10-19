@@ -1,6 +1,7 @@
 #include "host/Renderer.hpp"
 
 #include <algorithm>
+#include <atomic>
 #include <cmath>
 #include <exception>
 #include <format>
@@ -95,10 +96,39 @@ expected<void, HostError> Renderer::initialise(int sample_rate, int block_size) 
         return s;
     }
     started_ = true;
+    if (!have_clean_) {
+        // The clean snapshot of spec 05 section 5; a plugin without state support has nothing to reload.
+        have_clean_ = true;
+        try {
+            if (auto st = engine_->save_state()) clean_ = std::move(*st);
+        } catch (...) {
+        }
+    }
     return {};
 }
 
-std::string Renderer::value_text(std::uint32_t id, double coord) const { return engine_->value_text(id, coord); }
+std::string Renderer::value_text(std::uint32_t id, double coord) const {
+    try {
+        return engine_->value_text(id, coord);
+    } catch (...) {
+        return {};  // spec 05 section 9: a plugin exception never crosses into the host
+    }
+}
+
+void Renderer::recover() {
+    if (!restart_engine()) return;
+    if (!clean_.empty()) (void)load_state(clean_);
+}
+
+expected<void, HostError> Renderer::handle_restart_request() {
+    try {
+        engine_->pump_main_thread();
+    } catch (...) {
+    }
+    if (!engine_->take_restart_request()) return {};
+    if (engine_->rescan_parameters()) ++version_;
+    return restart_engine();
+}
 
 void Renderer::pump() {
     pump_.pump();
@@ -143,6 +173,19 @@ Outcome Renderer::fail(Outcome outcome, std::string message) {
 }
 
 expected<Audio, Outcome> Renderer::render(const Job& job) {
+    auto r = render_once(job);
+    if (!r) {
+        const std::string why = message_;
+        recover();
+        message_ = why;
+    }
+    // Restart requests are not failures: re-enumerate, bump the version (spec 05 section 9). Checked
+    // after failed renders too, so a table change is never missed.
+    if (auto h = handle_restart_request(); !h && r) return unexpected(fail(Outcome::HostError, h.error().message));
+    return r;
+}
+
+expected<Audio, Outcome> Renderer::render_once(const Job& job) {
     message_.clear();
     const auto& params = engine_->parameters();
     if (job.coords.size() != params.size())
@@ -218,6 +261,7 @@ expected<Audio, Outcome> Renderer::render(const Job& job) {
     const auto run_block = [&](int frames, std::span<const ParamValue> pv, std::span<const NoteEvent> ev,
                                bool record) -> bool {
         expected<void, HostError> r;
+        if (blocks_) std::atomic_ref<std::uint64_t>(*blocks_).fetch_add(1, std::memory_order_relaxed);
         thread_.run([&] {
             r = guarded("process", [&] {
                 return engine_->process(Block{frames, pv, ev}, left.data(), right.data());
@@ -298,12 +342,6 @@ expected<Audio, Outcome> Renderer::render(const Job& job) {
     }
     if (!job.allow_silent && peak < std::pow(10.0, kSilenceDb / 20.0))
         return unexpected(fail(Outcome::Silent, "output below -90 dBFS"));
-
-    // Restart requests are not failures: re-enumerate, bump the version (spec 05 section 9).
-    if (engine_->take_restart_request()) {
-        if (engine_->rescan_parameters()) ++version_;
-        if (auto r = restart_engine(); !r) return unexpected(fail(Outcome::HostError, r.error().message));
-    }
     return out;
 }
 

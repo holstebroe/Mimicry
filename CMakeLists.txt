@@ -144,11 +144,18 @@ add_library(mimicry_supervisor STATIC
 target_link_libraries(mimicry_supervisor PUBLIC mimicry_host mimicry_core)
 mimicry_warnings(mimicry_supervisor)
 
+# Run output (docs/spec/07_OUTPUT_VALIDATION.md): failure reports so far (spec 05 section 7).
+add_library(mimicry_output STATIC
+    src/output/FailureReport.cpp
+)
+target_link_libraries(mimicry_output PUBLIC mimicry_host mimicry_core)
+mimicry_warnings(mimicry_output)
+
 # --- Executables -------------------------------------------------------------------------------
 
 # Supervisor / command line.
 add_executable(mimicry src/app/main.cpp)
-target_link_libraries(mimicry PRIVATE mimicry_opt mimicry_supervisor mimicry_host mimicry_core)
+target_link_libraries(mimicry PRIVATE mimicry_opt mimicry_output mimicry_supervisor mimicry_host mimicry_core)
 mimicry_warnings(mimicry)
 
 # Render worker: the only process that loads plugins (docs/spec/05_RESILIENCE.md section 1).
@@ -233,15 +240,15 @@ if(MIMICRY_BUILD_TESTS)
         mimicry_warnings(mimicry_worker_test)
         add_dependencies(mimicry_worker_test mimicry_test_synth mimicry_worker)
         add_executable(mimicry_fit_test src/tests/fit_test_main.cpp)
-        target_link_libraries(mimicry_fit_test PRIVATE mimicry_opt mimicry_supervisor)
+        target_link_libraries(mimicry_fit_test PRIVATE mimicry_opt mimicry_output mimicry_supervisor)
         target_include_directories(mimicry_fit_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
         mimicry_warnings(mimicry_fit_test)
-        add_dependencies(mimicry_fit_test mimicry_test_synth mimicry_worker)
-        add_test(NAME fit_clap COMMAND mimicry_fit_test $<TARGET_FILE:mimicry_test_synth> $<TARGET_FILE:mimicry_worker>)
+        add_dependencies(mimicry_fit_test mimicry_test_synth mimicry_worker mimicry)
+        add_test(NAME fit_clap COMMAND mimicry_fit_test $<TARGET_FILE:mimicry_test_synth> $<TARGET_FILE:mimicry_worker> $<TARGET_FILE:mimicry>)
 
         if(MIMICRY_TEST_SYNTH_VST3)
             add_dependencies(mimicry_fit_test mimicry_test_synth_vst3_build)
-            add_test(NAME fit_vst3 COMMAND mimicry_fit_test ${MIMICRY_TEST_SYNTH_VST3} $<TARGET_FILE:mimicry_worker>)
+            add_test(NAME fit_vst3 COMMAND mimicry_fit_test ${MIMICRY_TEST_SYNTH_VST3} $<TARGET_FILE:mimicry_worker> $<TARGET_FILE:mimicry>)
             add_dependencies(mimicry_host_test mimicry_test_synth_vst3_build)
             add_dependencies(mimicry_worker_test mimicry_test_synth_vst3_build)
             add_test(NAME host_vst3 COMMAND mimicry_host_test ${MIMICRY_TEST_SYNTH_VST3})

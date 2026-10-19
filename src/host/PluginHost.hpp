@@ -114,6 +114,10 @@ public:
     [[nodiscard]] virtual std::uint64_t parameters_version() const = 0;
     // Main thread: lets the plugin run its pending main-thread callbacks and drains the system queue.
     virtual void pump() = 0;
+    // Optional progress word, incremented (atomically) as every block of a render starts, so a supervisor
+    // that killed a hung worker can tell "never reached the first block" (spec 05 section 9).
+    // Null turns it off; the word must stay valid while set.
+    virtual void set_block_counter(std::uint64_t* /*counter*/) {}
 
     [[nodiscard]] virtual expected<std::vector<std::uint8_t>, HostError> save_state() = 0;
     [[nodiscard]] virtual expected<void, HostError> load_state(const std::vector<std::uint8_t>& blob) = 0;

@@ -10,6 +10,11 @@
 //   lfo_seed   == 0            random LFO phase per note (repeatability floor); > 0 is deterministic
 //   program    changes        overwrites wave and cutoff (the program-change parameter, pinned by hosts)
 //   restart    crosses 0.5    asks the host for a restart / parameter rescan (T16)
+//   haz_sticky > 0.90          output turns NaN for the life of the instance: survives reset, re-activation
+//                              and state load (the canary of spec 05 section 5 must restart the worker)
+//   haz_throw  > 0.90          process() throws a C++ exception (spec 05 section 9: caught, HostError)
+//   haz_rename crosses 0.5     renames "Hidden Drive" and asks for a parameter rescan: the parameter table
+//                              changes between candidates (spec 05 section 9). Hidden, so never searched
 
 #include <algorithm>
 #include <array>
@@ -20,6 +25,7 @@
 #include <functional>
 #include <limits>
 #include <random>
+#include <stdexcept>
 #include <thread>
 
 namespace mimicry::testsynth {
@@ -46,6 +52,9 @@ enum ParamId : std::uint32_t {
     kBypass,
     kMeter,   // read-only
     kHidden,  // hidden
+    kHazSticky,
+    kHazThrow,
+    kHazRename,  // hidden
     kParamCount
 };
 
@@ -86,7 +95,12 @@ inline constexpr ParamInfo kParams[kParamCount] = {
     {kBypass, "Bypass", "Global", "", 0, 1, 0, true, false, false, true, Scale::Linear},
     {kMeter, "Meter", "Global", "dB", -96, 0, -96, false, false, true, false, Scale::Linear},
     {kHidden, "Hidden Drive", "Global", "", 0, 1, 0, false, true, false, false, Scale::Linear},
+    {kHazSticky, "Hazard Sticky", "Hazards", "", 0, 1, 0, false, false, false, false, Scale::Linear},
+    {kHazThrow, "Hazard Throw", "Hazards", "", 0, 1, 0, false, false, false, false, Scale::Linear},
+    {kHazRename, "Hazard Rename", "Hazards", "", 0, 1, 0, false, true, false, false, Scale::Linear},
 };
+
+inline constexpr const char* kRenamedHidden = "Hidden Drive (renamed)";
 
 // Programs overwrite the wave and cutoff parameters (the reason hosts pin the program parameter).
 struct Program {
@@ -98,6 +112,8 @@ class Synth {
 public:
     // Called when a parameter request needs the host to restart the component (kRestart crossing 0.5).
     std::function<void()> on_restart_request;
+    // Called when the parameter names changed (kHazRename crossing 0.5): the host must rescan.
+    std::function<void()> on_rename;
 
     Synth() { reset(); }
 
@@ -133,6 +149,16 @@ public:
             values_[kCutoff] = pr.cutoff;
         }
         if (id == kRestart && old < 0.5 && plain >= 0.5 && on_restart_request) on_restart_request();
+        if (id == kHazRename && (old >= 0.5) != (plain >= 0.5)) {
+            renamed_ = plain >= 0.5;
+            if (on_rename) on_rename();
+        }
+    }
+
+    // Display name of a parameter: kHidden changes name with kHazRename.
+    [[nodiscard]] const char* name(std::uint32_t id) const {
+        if (id == kHidden && renamed_) return kRenamedHidden;
+        return id < kParamCount ? kParams[id].name : "";
     }
 
     // Tuning is the CLAP note-expression value in semitones, or VST3 tuning converted to semitones.
@@ -189,6 +215,8 @@ public:
             for (;;) std::this_thread::sleep_for(std::chrono::seconds(3600));  // planted hang
         }
         if (values_[kHazPoison] > 0.9) poisoned_ = true;
+        if (values_[kHazSticky] > 0.9) stuck_ = true;
+        if (values_[kHazThrow] > 0.9) throw std::runtime_error("planted exception");
 
         const double level = std::pow(10.0, values_[kLevel] / 20.0);
         const bool nan_out = values_[kHazNan] > 0.9;
@@ -233,7 +261,7 @@ public:
                 mix += v.lp * v.env * v.velocity;
             }
             double out = mix * level;
-            if (poisoned_) out = std::numeric_limits<double>::quiet_NaN();
+            if (poisoned_ || stuck_) out = std::numeric_limits<double>::quiet_NaN();
             if (nan_out) out = std::numeric_limits<double>::quiet_NaN();
             if (bypass) out = 0;
             left[n] = right[n] = static_cast<float>(out);
@@ -256,6 +284,8 @@ private:
     std::array<double, kParamCount> values_{};
     double rate_ = 48000.0;
     bool poisoned_ = false;
+    bool stuck_ = false;    // never cleared: only a new instance is clean
+    bool renamed_ = false;  // follows kHazRename, not part of the DSP state
 };
 
 }  // namespace mimicry::testsynth

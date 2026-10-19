@@ -1,7 +1,8 @@
 // Optimizer against a real plugin (WP3): the probe classifies mimicry_test_synth's parameters and finds its
 // safe box, the profile round-trips, the pipeline recovers a preset of the plugin's own (a small T6) and the
-// fingerprint database seeds from the right neighbourhood; failure bisection finds the planted crash (T8). Renders go through a worker pool, as in
-// production (CLAUDE.md rule 4). Usage: mimicry_fit_test <plugin> <mimicry_worker>.
+// fingerprint database seeds from the right neighbourhood; failure bisection finds the planted crash (T8),
+// and its failure report replays with `mimicry replay` (spec 05 section 7). Renders go through a worker pool, as in
+// production (CLAUDE.md rule 4). Usage: mimicry_fit_test <plugin> <mimicry_worker> [<mimicry>].
 
 #include <cmath>
 #include <cstdlib>
@@ -9,10 +10,16 @@
 #include <filesystem>
 #include <format>
 #include <string>
+#include <utility>
+
+#if !defined(_WIN32)
+#include <sys/wait.h>
+#endif
 
 #include "features/Loss.hpp"
 #include "host/ParamUtil.hpp"
 #include "opt/Constraints.hpp"
+#include "output/FailureReport.hpp"
 #include "opt/Fingerprint.hpp"
 #include "opt/Objective.hpp"
 #include "opt/Pipeline.hpp"
@@ -102,6 +109,11 @@ int main(int argc, char** argv) {
     const auto* hang = entry(*prof, ts::kHazHang);
     check(hang && hang->outcomes.back() == Outcome::Timeout && hang->safe_hi == 0.75, "probe: the hang hazard is a timeout");
     check(!prof->pairs.empty(), "probe: pair interactions measured");
+    for (auto id : {ts::kHazNan, ts::kHazHang, ts::kHazPoison, ts::kHazSticky, ts::kHazThrow}) {
+        const auto* e = entry(*prof, id);
+        check(e && e->dead() && e->outcomes.back() != Outcome::Ok && e->safe_hi == 0.75,
+              "probe: a hazard switch that only fails is dead, its failure kept: " + (e ? e->name : std::to_string(id)));
+    }
 
     // --- T8: bisection finds the planted crash {Hazard A > 0.8, Hazard B > 0.9} within 2 % (spec 05 section 4) ---
     {
@@ -141,6 +153,50 @@ int main(int argc, char** argv) {
             out[ts::kHazA] = 0.85, out[ts::kHazB] = 0.85;
             check(set.find(in) && !set.find(out), "T8: the stored region rejects the crash corner only");
         }
+
+        // Spec 05 section 7: the failure report round-trips and replays.
+        const auto rdir = std::filesystem::temp_directory_path() / ("mimicry_crashes_" + std::string(host::to_string(info.format)));
+        std::filesystem::remove_all(rdir);
+        output::FailureReport fr;
+        fr.info = info;
+        fr.plugin_path = std::filesystem::absolute(argv[1]).string();
+        fr.job = job;
+        fr.job.coords = bad;
+        fr.outcome = Outcome::Crash;
+        fr.set_params(params);
+        for (std::size_t k = 0; k < r.minimal.size(); ++k)
+            fr.minimal.push_back({params[r.minimal[k]].id, params[r.minimal[k]].name, r.threshold[k]});
+        auto nan_report = fr;
+        nan_report.job.coords = good;
+        nan_report.job.coords[ts::kHazNan] = 1.0;
+        nan_report.outcome = Outcome::NonFinite;
+        nan_report.minimal.clear();
+        nan_report.set_params(params);
+        const auto crash_path = fr.write(rdir);
+        const auto nan_path = nan_report.write(rdir);
+        check(crash_path && nan_path && *crash_path != *nan_path, "failure reports written, distinct files");
+        if (crash_path && nan_path) {
+            auto back = output::FailureReport::load(*crash_path);
+            check(back && back->outcome == Outcome::Crash && back->minimal.size() == r.minimal.size() &&
+                      back->coords_for(params) == bad && back->job.notes.size() == job.notes.size() && back->hash() == fr.hash(),
+                  "failure report round trip");
+            auto shuffled = params;  // matched on id + name, not position (rule 7)
+            std::swap(shuffled[ts::kHazA], shuffled[ts::kHazB]);
+            const auto moved = back ? back->coords_for(shuffled) : std::vector<double>{};
+            check(moved.size() == params.size() && moved[ts::kHazA] == bad[ts::kHazB] && moved[ts::kHazB] == bad[ts::kHazA],
+                  "failure report values follow ids and names");
+            if (argc > 3) {
+                auto run = [&](const std::string& extra, const std::filesystem::path& file) {
+                    const std::string cmd = std::format("\"{}\" replay \"{}\" {} > /dev/null 2>&1", argv[3], file.string(), extra);
+                    const int st = std::system(cmd.c_str());
+                    return WIFEXITED(st) ? WEXITSTATUS(st) : -1;
+                };
+                check(run("--isolated", *crash_path) == 0, "replay --isolated reproduces the crash");
+                check(run("", *nan_path) == 0, "replay in-process reproduces the NaN");
+                check(run("--isolated", *nan_path) == 0, "replay --isolated reproduces the NaN");
+            }
+        }
+        std::filesystem::remove_all(rdir);
     }
 
     const auto dir = std::filesystem::temp_directory_path() / ("mimicry_fit_test_" + std::string(host::to_string(info.format)));

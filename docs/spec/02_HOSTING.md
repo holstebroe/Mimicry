@@ -110,7 +110,7 @@ A **render job** = full parameter vector + note plan + sample rate + block size,
 effects (fed from the first block after settle; output is shifted back by the reported latency) [A].
 
 ```
-reset instance (clean state, 05 §5)
+reset instance (clean state, 05 §5; after a failed render also the clean snapshot is reloaded)
 block 0:  apply every active parameter at time 0                       (full vector, never a delta)
 settle:   process silent blocks for settle_ms                          (smoothers converge; Acidus sends CCs 1.2 s early [S])
 notes:    note-on / note-off at sample-exact times from the plan; velocity as given
