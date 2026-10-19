@@ -13,7 +13,13 @@ next: see `docs/PROJECT_PLAN.md` for the work packages and their order.
 - `mimicry fit`: match a WAV with an instrument plugin (CLAP or VST3), safely and offline, and write a
   preset plus A/B audio.
 - `mimicry transfer`: match a source plugin's presets (or a whole bank) in a target plugin, in any
-  format combination.
+  format combination, for instruments and effects (effects are probed with built-in test signals).
+- `mimicry harvest` / `capture`: collect a plugin's presets as verified states, by whatever method it
+  supports (preset files and folders, CLAP preset discovery, VST3 program lists, program change), or on
+  Windows by picking them in the plugin's own editor, including a taught "next preset" click.
+- `mimicry map`: map one plugin's parameters to another's and to roles such as cutoff or attack.
+- `mimicry doctor`: a report of what a plugin and each of its parameters does (frequency response,
+  distortion, dynamics, impulse response for effects; per-parameter curves for instruments).
 - `mimicry image`: match an image, through audio descriptors or as a target spectrogram.
 - Resilient by design: plugins are rendered in separate worker processes, so a plugin that crashes or
   hangs on an illegal parameter combination is scored as a failure and the search continues.
@@ -56,7 +62,7 @@ docs/            PROJECT_PLAN.md and spec/
 
 - [`docs/PROJECT_PLAN.md`](docs/PROJECT_PLAN.md): work packages, open questions, decision log.
 - [`docs/spec/`](docs/spec/): architecture, hosting, features and loss, optimizer, resilience,
-  targets, output and tests.
+  targets, output and tests, diagnosis report.
 - [`CLAUDE.md`](CLAUDE.md): development rules for humans and AI agents.
 
 ## License

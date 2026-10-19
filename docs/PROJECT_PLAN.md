@@ -35,7 +35,7 @@ Optimizer techniques come from Acidus (`tools/calibrate_reference.py`, `tools/fi
 | --- | --- |
 | Preset for a plugin from a WAV specimen | Goal 1, WP5.1 (`fit`) |
 | Presets for a target plugin from a source plugin's presets (synth or effect, any format pair) | Goal 2, WP5.2-5.3, 5.7, 5.11; source presets from the harvest (WP5.8-5.10, WP1.11-1.12) |
-| How the source changes preset | Harvest ladder, spec 06 §6: preset files, CLAP preset discovery + preset-load, VST3 program data / program lists / program-change parameter, MIDI program change, manual capture through the plugin's editor; every load verified and the method that worked kept in the profile |
+| How the source changes preset | Harvest ladder, spec 06 §6: preset files and folders, CLAP preset discovery + preset-load, VST3 program data / program lists / program-change parameter, MIDI program change, manual capture through the plugin's editor and a taught "next preset" click (Windows, WP5.9, 5.12); every load verified and the method that worked kept in the profile |
 | Map target parameters to source parameters and to roles (cutoff, attack, ...) | WP3.9 (roles), WP5.4a (map from probe signatures and units), WP5.4b (map learned from transfers), spec 04 §2 and §8 |
 | Instruments and effects | Instruments throughout; effects: WP1.10 (audio input), WP3.10 (effect probe), WP5.7 (probe signals, reamp, effect transfer), spec 06 §5 |
 | Diagnosis report of a plugin and its parameters (PluginDoctor-like) | Goal 4, WP8, spec 08 |
