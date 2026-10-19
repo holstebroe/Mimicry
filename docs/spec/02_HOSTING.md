@@ -98,6 +98,13 @@ the best evidence for semantics and scaling (04 §1-§2).
 
 Rules:
 - Skip read-only and (by default) hidden parameters; skip bypass and pin it to "not bypassed".
+- Program-change parameters are pinned by **never sending them**: a render's full vector leaves them out,
+  because sending even the default is a program change (a wrapper turns it into a MIDI program change
+  that can land after the other values and overwrite them) [A].
+- VST3: a parameter that `IMidiMapping` assigns to a MIDI controller (any channel, `0..kCountCtrlNumber`)
+  **and** that is not automatable is a MIDI input proxy (clap-wrapper, JUCE), not plugin state: it is left
+  out of the parameter table, so a full vector never sends "CC 7 = 0". A real, automatable parameter a CC
+  drives stays in. The `kPitchBend` assignment is kept for pitch bend (§5) [A].
 - Never touch tempo-sync or transport parameters without being asked [D]; transport is a fixed 120 BPM.
 - Ids are used verbatim and never renumbered; profiles key on format, plugin uid, id and name together,
   so a plugin update that reorders them is detected (version hash mismatch → re-probe).
@@ -127,6 +134,16 @@ note-expression TUNING when supported, else MIDI pitch bend with a measured rang
 at bend 0 and max gives the real bend range). If none exists, the nearest key is used and the residual
 (up to 50 cents) is reported [I]. Pitch is *measured* from the target and applied directly, not
 searched [S: Acidus measures tuning explicitly].
+
+Implemented [A]: `opt/PitchCalibration` renders the note three times at the defaults: plain, +50 cents
+through the format's tuning, and a full MIDI pitch bend up. Tuning is used when it moves the pitch within
+10 cents of the request; else bend when a full bend moves it at least 20 cents (that shift is the range);
+else the nearest key [D]. A calibration note that is not clearly pitched (f0 confidence < 0.5) leaves the
+method unknown and tuning is used. `probe` stores the result in the profile; `fit` calibrates when the
+profile has none. With bend, `Job::bend_range` makes the render core send each note's cents as a pitch bend
+(`cents / (100 · range)`, channel-wide) instead of tuning: CLAP as a `CLAP_EVENT_MIDI` 0xE0 on a note port
+with the MIDI dialect, VST3 as the parameter `IMidiMapping` assigns to `kPitchBend`. `fit` reports the
+measured residual (f0 of the match against the target's) as `pitch.residual_cents` in `result.json`.
 
 ## 6. Output checks (in the worker)
 
@@ -161,7 +178,7 @@ and a name when the plugin has one. Methods per format, in the order the harvest
 | Raw file as state (opt-in) [I] | `state.load` of a plugin-specific preset file | `IComponent::setState` of it; works only where the plugin's file is its state, so it is verified like every load |
 | Plugin presets | preset-discovery providers → locations (file / plugin) + load keys → `preset-load.from_location` [S: CLAP] | `IProgramListData::getProgramData` per program when `programDataSupported` [S: VST3 SDK] |
 | Program list | — | `IUnitInfo` list and names; set the program-change parameter to `index / (count − 1)` |
-| Program change | MIDI program change on a note port with the MIDI dialect | `IMidiMapping::getMidiControllerAssignment(kCtrlProgramChange)` → parameter |
+| Program change | MIDI program change on a note port with the MIDI dialect | a `kIsProgramChange` parameter (`IMidiMapping` cannot be asked for `kCtrlProgramChange`: it is outside `kCountCtrlNumber`) |
 | Heuristic | stepped parameter named Program / Preset / Patch (§2) | same |
 | Manual | editor; the user picks the preset | same |
 

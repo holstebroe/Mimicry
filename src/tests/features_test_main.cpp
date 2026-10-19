@@ -89,6 +89,14 @@ void test_pitch() {
         check(std::fabs(e.f0 / f - 1.0) < 0.001, "f0 of a harmonic tone: " + std::to_string(f) + " got " + std::to_string(e.f0));
         check(e.confidence > 0.8, "f0 confidence of a clean tone");
     }
+    // A pure sine is its own fundamental, not f/7 (plan OQ11): a sub-octave comb pays for the empty harmonic
+    // slots below the tone, the tone pays nothing for the harmonics it never had.
+    for (double f : {82.41, 220.0, 440.0, 1318.5}) {
+        const auto e = estimate_f0(tone(f, 1.5, 0, 1), kRate);
+        check(std::fabs(e.f0 / f - 1.0) < 0.001, "f0 of a pure sine: " + std::to_string(f) + " got " + std::to_string(e.f0));
+        const auto noisy = estimate_f0(tone(f, 1.5, 0, 1, 50, 0.8, 0.002), kRate);
+        check(std::fabs(noisy.f0 / f - 1.0) < 0.002, "f0 of a sine in noise: " + std::to_string(f) + " got " + std::to_string(noisy.f0));
+    }
     // Odd harmonics only (square-like) must not collapse to a sub-octave comb.
     {
         Rng r(1);

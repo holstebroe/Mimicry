@@ -17,6 +17,12 @@ namespace mimicry::host {
 // Stepped parameters are never log.
 [[nodiscard]] bool use_log_scale(double min, double max, int steps, const std::string& units);
 
+// A continuous parameter whose own value texts read as a frequency or a time (Hz/kHz, ms/s, mixed units
+// allowed) and run LINEARLY across the coordinate over at least two decades: returns max/min of the texts,
+// else 0. Such a parameter is searched with an exact log warp of that ratio (spec 04 section 9, plan OQ9):
+// clap-wrapper and many VST3 plugins expose 20 Hz - 20 kHz or 1 ms - 2 s linearly in the normalised value [A].
+[[nodiscard]] double linear_wide_taper_ratio(const ParamDesc& p);
+
 // CLAP has no program-change flag, and wrappers do not always set VST3's: a stepped parameter named like
 // one is pinned all the same [I].
 [[nodiscard]] bool looks_like_program_param(const std::string& name);

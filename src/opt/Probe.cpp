@@ -8,6 +8,7 @@
 #include "core/ParamSemantics.hpp"
 #include "features/Features.hpp"
 #include "features/Loss.hpp"
+#include "opt/PitchCalibration.hpp"
 #include "features/Pitch.hpp"
 #include "opt/Space.hpp"
 
@@ -279,6 +280,11 @@ expected<Profile, std::string> probe(const RenderBatch& render, const host::Plug
         }
         log(std::format("pairs: {} probed", pairs.size()));
     }
+    // 6. How the plugin takes fine pitch (spec 02 section 5): tuning, pitch bend with its range, or the nearest key.
+    prof.pitch = calibrate_pitch([&](const std::vector<host::Job>& jobs) { return run(jobs); }, job_at(defaults));
+    log(std::format("pitch: {}{}", to_string(prof.pitch.method),
+                    prof.pitch.method == PitchMethod::Bend ? std::format(" (range {:.2f} semitones)", prof.pitch.bend_range)
+                                                           : prof.pitch.note.empty() ? std::string() : " (" + prof.pitch.note + ")"));
     prof.render_ms = renders ? 1000.0 * render_s / double(renders) : 0.0;
     return prof;
 }

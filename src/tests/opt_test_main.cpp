@@ -22,6 +22,7 @@
 #include "opt/Embedding.hpp"
 #include "opt/Fingerprint.hpp"
 #include "opt/Pipeline.hpp"
+#include "opt/PitchCalibration.hpp"
 #include "opt/Probe.hpp"
 #include "opt/Profile.hpp"
 #include "opt/Space.hpp"
@@ -523,6 +524,52 @@ void test_constraints() {
           "profile: constraints round trip");
 }
 
+// Spec 02 section 5: the calibration tells tuning, pitch bend (with its range) and nearest key apart.
+void test_pitch_calibration() {
+    enum Mode { Tuning, Bend, Neither };
+    auto make = [](Mode mode, double plugin_range) {
+        return RenderBatch([mode, plugin_range](const std::vector<host::Job>& jobs) {
+            std::vector<expected<host::Audio, Outcome>> out;
+            for (const auto& j : jobs) {
+                const auto& n = j.notes.front();
+                double cents = 0;
+                if (j.bend_range > 0) {  // what the render core sends: a bend of cents / range
+                    if (mode == Bend) cents = std::clamp(n.cents / (100.0 * j.bend_range), -1.0, 1.0) * plugin_range * 100.0;
+                } else if (mode == Tuning) {
+                    cents = n.cents;
+                }
+                const double f = 440.0 * std::pow(2.0, (n.key - 69) / 12.0 + cents / 1200.0);
+                host::Audio a{48000, 1, std::vector<float>(48000)};
+                for (std::size_t i = 0; i < a.samples.size(); ++i)
+                    a.samples[i] = float(0.3 * std::sin(2 * std::numbers::pi * f * double(i) / 48000.0));
+                out.push_back(std::move(a));
+            }
+            return out;
+        });
+    };
+    host::Job job;
+    job.notes.push_back({57, 0, 0.8f, 0, 500});
+    const auto t = calibrate_pitch(make(Tuning, 2), job);
+    check(t.method == PitchMethod::Tuning && std::abs(t.tuning_cents - 50) < 2, "pitch calibration: tuning");
+    const auto b = calibrate_pitch(make(Bend, 5), job);
+    check(b.method == PitchMethod::Bend && std::abs(b.bend_range - 5) < 0.05,
+          "pitch calibration: bend range " + std::to_string(b.bend_range));
+    const auto k = calibrate_pitch(make(Neither, 2), job);
+    check(k.method == PitchMethod::NearestKey, "pitch calibration: nearest key");
+    auto j2 = job;
+    j2.notes[0].cents = 30;
+    apply_pitch_method(b, j2);
+    check(j2.bend_range == b.bend_range && j2.notes[0].cents == 30, "pitch: bend keeps the cents, sets the range");
+    apply_pitch_method(k, j2);
+    check(j2.bend_range == 0 && j2.notes[0].cents == 0, "pitch: nearest key drops the cents");
+    Profile prof;
+    prof.uid = "x";
+    prof.pitch = b;
+    auto back = Profile::from_json(prof.to_json());
+    check(back && back->pitch.method == PitchMethod::Bend && std::abs(back->pitch.bend_range - b.bend_range) < 1e-12,
+          "profile: pitch calibration round trip");
+}
+
 // Synthetic objective: a quadratic bowl around `target` (dB-like), a categorical that must match, and a
 // planted crash region (first two parameters both high), as the test synth's A/B hazard.
 class Synthetic final : public Objective {
@@ -721,6 +768,7 @@ int main() {
     test_probe_safe_box();
     test_embedding();
     test_constraints();
+    test_pitch_calibration();
     test_pipeline();
     if (failures) {
         std::fprintf(stderr, "%d failure(s)\n", failures);

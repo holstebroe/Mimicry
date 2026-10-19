@@ -105,6 +105,13 @@ json::Value Profile::to_json() const {
     }
     v.set("pairs", json::Value(std::move(pr)));
     v.set("constraints", ConstraintSet::to_json(constraints));
+    json::Value pc;
+    pc.set("method", std::string(to_string(pitch.method)));
+    pc.set("bend_range", pitch.bend_range);
+    pc.set("tuning_cents", pitch.tuning_cents);
+    pc.set("bend_cents", pitch.bend_cents);
+    if (!pitch.note.empty()) pc.set("note", pitch.note);
+    v.set("pitch", std::move(pc));
     return v;
 }
 
@@ -150,6 +157,12 @@ expected<Profile, std::string> Profile::from_json(const json::Value& v) {
     auto cs = ConstraintSet::from_json(v["constraints"]);
     if (!cs) return unexpected("profile: " + cs.error());
     p.constraints = std::move(*cs);
+    const auto& pc = v["pitch"];
+    p.pitch.method = parse_pitch_method(pc["method"].as_string());
+    p.pitch.bend_range = pc["bend_range"].as_number();
+    p.pitch.tuning_cents = pc["tuning_cents"].as_number();
+    p.pitch.bend_cents = pc["bend_cents"].as_number();
+    p.pitch.note = pc["note"].as_string();
     return p;
 }
 

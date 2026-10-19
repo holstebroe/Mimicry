@@ -154,8 +154,8 @@ files, user presets, or the plugin's saved state on disk.
   open, and so does every re-open after a crash or recycle. A difference fails that render and every
   later one with `HostError`; `fit` (through the pipeline's `abort`) and `probe` stop with the
   difference in the message. Callers keep the table they indexed into.
-- **Program-change parameters** (VST3 `kIsProgramChange`, CLAP equivalents): pinned, never searched,
-  because a program change would silently overwrite every other parameter mid-job. Preset harvest
+- **Program-change parameters** (VST3 `kIsProgramChange`, CLAP equivalents): pinned, never searched and
+  never sent (02 §4), because a program change would silently overwrite every other parameter mid-job. Preset harvest
   (06 §6) is the one place a program is changed, in its own jobs, and its result is a state blob that
   later jobs load whole.
 - **Plugin editors** are opened only by `capture` (Windows), in the worker. A crash or hang in the editor is a

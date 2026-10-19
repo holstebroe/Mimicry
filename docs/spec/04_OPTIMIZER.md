@@ -144,7 +144,13 @@ and `src/opt` use these [D] unless noted:
 - **Warp.** A parameter whose probe response is `log` (more than half of the change in the first quarter of
   u) is searched in `x` with `u = (100^x − 1) / 99`, unless the backend already decodes it in log. This
   applies to **both** formats: the clap-wrapper build of the test synth exposes its 20 Hz-20 kHz cutoff
-  linearly in the VST3 normalised value, which the probe flags (plan OQ9).
+  linearly in the VST3 normalised value, which the probe flags (plan OQ9). The probe misses a time
+  parameter it classes by level (a long attack lowers the level, linearly), so the plugin's own value texts
+  decide too [A]: a continuous parameter whose texts at 0/25/50/75/100 % read as Hz/kHz or ms/s, lie on a
+  straight line (each quarter point within 5 % of the span) and span at least a factor 100, is searched with
+  the exact log map of that ratio, `u = (r^x − 1) / (r − 1)` with `r = max / min` (capped at 10^5), probe or
+  not. Measured: the VST3 test fit put Attack (1 ms - 2 s, linear) at 1064 ms instead of 5 ms on 2 of 6
+  seeds (2.06 dB); with the text warp all 6 seeds end below 0.6 dB.
 - **Boundary penalty.** 100 dB per unit² of clip distance in `x`, added to the CMA-ES fitness only (the
   rendered point is the clipped one).
 - **Invalid candidates** rank after all valid ones as `10^6 + 10^4 · severity + 100 · distance` to the run's

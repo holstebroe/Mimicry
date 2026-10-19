@@ -71,6 +71,15 @@ double dominant_hz(const Audio& a, double from_s, double to_s) {
     return static_cast<double>(peak) * a.sample_rate / static_cast<double>(n);
 }
 
+// The parameters the test synth defines: drops a program-change parameter only one format has (clap-wrapper's
+// MIDI program change in the VST3 build), which hosts pin and never send.
+std::vector<ParamDesc> own_parameters(const Instance& inst) {
+    std::vector<ParamDesc> out;
+    for (const auto& p : inst.parameters())
+        if (!(p.flags.program_change && p.id >= ts::kParamCount)) out.push_back(p);
+    return out;
+}
+
 void test_enumeration(Instance& inst) {
     const auto& info = inst.info();
     const bool clap = info.format == PluginFormat::Clap;
@@ -78,7 +87,8 @@ void test_enumeration(Instance& inst) {
     check(info.kind == PluginKind::Instrument, "kind is Instrument");
     check(!info.version_hash.empty() && info.version_hash != "unknown", "version hash is set");
 
-    const auto& ps = inst.parameters();
+    // The synth's own parameters; a VST3 wrapper may add a MIDI program-change parameter (pinned, never sent).
+    const auto ps = own_parameters(inst);
     check(ps.size() == ts::kParamCount, "parameter count " + std::to_string(ps.size()));
     if (ps.size() != ts::kParamCount) return;
     for (std::uint32_t i = 0; i < ts::kParamCount; ++i) {
@@ -206,8 +216,8 @@ void test_restart_and_state(Instance& inst, const std::string& path) {
 
 // T13: the same synth as CLAP and as VST3 gives the same parameters and (nearly) the same audio.
 void test_equivalence(Instance& a, Instance& b) {
-    const auto& pa = a.parameters();
-    const auto& pb = b.parameters();
+    const auto pa = own_parameters(a);
+    const auto pb = own_parameters(b);
     check(pa.size() == pb.size(), "same parameter count in both formats");
     if (pa.size() != pb.size()) return;
     for (std::size_t i = 0; i < pa.size(); ++i) {

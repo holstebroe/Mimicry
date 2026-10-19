@@ -200,12 +200,12 @@ expected<Audio, Outcome> Renderer::render_once(const Job& job) {
         if (auto r = restart_engine(); !r) return unexpected(fail(Outcome::HostError, r.error().message));
     }
 
-    // The full vector. Read-only parameters are not sent; bypass and program change are pinned to their
-    // default; program change goes first so it cannot overwrite the values that follow.
+    // The full vector. Read-only and program-change parameters are never sent: sending even its default IS a
+    // program change (a wrapper turns it into a MIDI program change that may land after the values and
+    // overwrite them), so a program parameter is pinned by leaving it alone (spec 05 section 9). Bypass is
+    // pinned to its default.
     std::vector<ParamValue> values;
     values.reserve(params.size());
-    for (std::size_t i = 0; i < params.size(); ++i)
-        if (params[i].flags.program_change) values.push_back({params[i].id, params[i].default_coord});
     for (std::size_t i = 0; i < params.size(); ++i) {
         const ParamDesc& p = params[i];
         if (p.flags.readonly || p.flags.program_change) continue;
@@ -227,8 +227,13 @@ expected<Audio, Outcome> Renderer::render_once(const Job& job) {
     double plan_end_ms = 0;
     for (const Note& n : job.notes) {
         const std::int32_t id = next_id++;
-        events.push_back({static_cast<std::uint32_t>(std::max(frames_for(n.on_ms, rate), 0)), true, n.key, n.cents,
-                          n.velocity, id});
+        NoteEvent on{static_cast<std::uint32_t>(std::max(frames_for(n.on_ms, rate), 0)), true, n.key, n.cents, n.velocity, id};
+        if (job.bend_range > 0) {  // cents as pitch bend (spec 02 section 5)
+            on.set_bend = true;
+            on.bend = std::clamp(n.cents / (100.0 * job.bend_range), -1.0, 1.0);
+            on.cents = 0;
+        }
+        events.push_back(on);
         events.push_back({static_cast<std::uint32_t>(std::max(frames_for(std::max(n.off_ms, n.on_ms), rate), 0)),
                           false, n.key, 0.0, 0.0f, id});
         plan_end_ms = std::max(plan_end_ms, std::max(n.off_ms, n.on_ms));

@@ -87,7 +87,10 @@ Three more hazards test spec 05 §5 and §9 [A]: *Hazard Sticky* (NaN for the li
 surviving reset, re-activation and state load, so only the canary's worker restart clears it), *Hazard
 Throw* (`process` throws a C++ exception) and the hidden *Hazard Rename* (renames *Hidden Drive* and asks
 for a parameter rescan, so the parameter table changes mid-run). They are appended to the table, so no
-earlier id moves.
+earlier id moves. For pitch (02 §5) it takes MIDI pitch bend on a note port with the MIDI dialect, and two
+hidden parameters: *Ignore Tuning* (tuning has no effect, so only bend moves the pitch) and *Bend Range*
+(1-24 semitones, default 2) [A]. The VST3 build therefore carries clap-wrapper's MIDI-mapping proxies (left
+out of the table, 02 §4) and its MIDI program-change parameter (pinned, never sent).
 
 For T17 it exposes a small factory bank (CLAP preset discovery, VST3 program list with program data,
 MIDI program change), including one duplicate and one preset that changes nothing. **`mimicry_test_fx`**

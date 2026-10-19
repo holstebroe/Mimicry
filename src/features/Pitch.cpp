@@ -76,6 +76,7 @@ PitchEstimate estimate_f0(const std::vector<float>& mono, int rate, double fmin,
             const int h_max = std::min(16, int(0.95 * nyq / f0));
             double num = 0, den = 0;
             score = 0;
+            int missing = 0, missing_below_last = 0;
             for (int k = 1; k <= h_max; ++k) {
                 const double target = k * f0, tol = std::min(0.03 * target, 0.35 * f0);
                 const Peak* hit = nullptr;
@@ -85,10 +86,15 @@ PitchEstimate estimate_f0(const std::vector<float>& mono, int rate, double fmin,
                     score += std::log(1.0 + hit->amp / amp_ref);
                     num += hit->amp * k * hit->freq;
                     den += hit->amp * k * k;
+                    missing_below_last = missing;
                 } else {
-                    score -= 1.0;  // a missing harmonic costs, which rules out sub-octave combs [D]
+                    ++missing;
                 }
             }
+            // A missing harmonic costs only below the highest one found: that rules out sub-octave combs (f/m
+            // leaves m-1 empty slots under the real tone) without punishing a tone's natural roll-off, so a
+            // pure sine is not read as f/7 (plan OQ11) [D].
+            score -= double(missing_below_last);
             if (den <= 0) return -1e9;
             f0 = num / den;
         }

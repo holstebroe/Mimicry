@@ -15,6 +15,9 @@
 //   haz_throw  > 0.90          process() throws a C++ exception (spec 05 section 9: caught, HostError)
 //   haz_rename crosses 0.5     renames "Hidden Drive" and asks for a parameter rescan: the parameter table
 //                              changes between candidates (spec 05 section 9). Hidden, so never searched
+//   ignore_tuning >= 0.5       note tuning (CLAP note expression, VST3 NoteOnEvent.tuning) is ignored, so only
+//                              MIDI pitch bend moves the pitch (spec 02 section 5 calibration). Hidden
+//   bend_range                 pitch-bend range in semitones (default 2). Hidden
 
 #include <algorithm>
 #include <array>
@@ -55,6 +58,8 @@ enum ParamId : std::uint32_t {
     kHazSticky,
     kHazThrow,
     kHazRename,  // hidden
+    kIgnoreTuning,  // hidden
+    kBendRange,     // hidden
     kParamCount
 };
 
@@ -98,6 +103,8 @@ inline constexpr ParamInfo kParams[kParamCount] = {
     {kHazSticky, "Hazard Sticky", "Hazards", "", 0, 1, 0, false, false, false, false, Scale::Linear},
     {kHazThrow, "Hazard Throw", "Hazards", "", 0, 1, 0, false, false, false, false, Scale::Linear},
     {kHazRename, "Hazard Rename", "Hazards", "", 0, 1, 0, false, true, false, false, Scale::Linear},
+    {kIgnoreTuning, "Ignore Tuning", "Global", "", 0, 1, 0, true, true, false, false, Scale::Linear},
+    {kBendRange, "Bend Range", "Global", "", 1, 24, 2, true, true, false, false, Scale::Linear},
 };
 
 inline constexpr const char* kRenamedHidden = "Hidden Drive (renamed)";
@@ -121,6 +128,7 @@ public:
     void reset() {
         for (auto& v : voices_) v = Voice{};
         poisoned_ = false;
+        bend_ = 0;
         for (std::uint32_t i = 0; i < kParamCount; ++i) values_[i] = kParams[i].def;
         rate_ = rate_ > 0 ? rate_ : 48000.0;
     }
@@ -174,7 +182,7 @@ public:
         v->active = true;
         v->key = key;
         v->note_id = note_id;
-        v->tuning = tuning_semitones;
+        v->tuning = values_[kIgnoreTuning] >= 0.5 ? 0.0 : tuning_semitones;
         v->velocity = velocity;
         v->stage = Stage::Attack;
         const auto seed = static_cast<std::uint32_t>(values_[kLfoSeed]);
@@ -186,6 +194,9 @@ public:
         }
     }
 
+    // MIDI pitch bend, -1..1 of the bend range (channel-wide).
+    void pitch_bend(double amount) { bend_ = std::clamp(amount, -1.0, 1.0); }
+
     void note_off(int key, std::int32_t note_id) {
         for (auto& v : voices_)
             if (v.active && v.stage != Stage::Release && (note_id >= 0 ? v.note_id == note_id : v.key == key))
@@ -194,7 +205,8 @@ public:
 
     void note_tuning(int key, std::int32_t note_id, double semitones) {
         for (auto& v : voices_)
-            if (v.active && (note_id >= 0 ? v.note_id == note_id : v.key == key)) v.tuning = semitones;
+            if (v.active && (note_id >= 0 ? v.note_id == note_id : v.key == key))
+                v.tuning = values_[kIgnoreTuning] >= 0.5 ? 0.0 : semitones;
     }
 
     [[nodiscard]] bool any_voice_active() const {
@@ -251,7 +263,7 @@ public:
                 }
                 v.lfo_phase += lfo_inc;
                 v.lfo_phase -= std::floor(v.lfo_phase);
-                const double cents = values_[kDetune] + v.tuning * 100.0 +
+                const double cents = values_[kDetune] + v.tuning * 100.0 + bend_ * values_[kBendRange] * 100.0 +
                                      values_[kLfoDepth] * std::sin(6.283185307179586 * v.lfo_phase);
                 const double freq = 440.0 * std::pow(2.0, (static_cast<double>(v.key) - 69.0) / 12.0 + cents / 1200.0);
                 v.phase += freq / rate_;
@@ -286,6 +298,7 @@ private:
     bool poisoned_ = false;
     bool stuck_ = false;    // never cleared: only a new instance is clean
     bool renamed_ = false;  // follows kHazRename, not part of the DSP state
+    double bend_ = 0;
 };
 
 }  // namespace mimicry::testsynth

@@ -1,8 +1,10 @@
 #include "host/ParamUtil.hpp"
 
 #include <algorithm>
+#include <array>
 #include <cctype>
 #include <cmath>
+#include <cstdlib>
 
 namespace mimicry::host {
 
@@ -47,6 +49,42 @@ bool looks_like_program_param(const std::string& name) {
     std::string n = trim(name);
     std::ranges::transform(n, n.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
     return n == "program" || n == "preset" || n == "patch" || n == "program change";
+}
+
+namespace {
+// "1.5 kHz" -> 1500, "250 ms" -> 250, "1.2 s" -> 1200: value in Hz or ms, kind 'f' or 't'; false otherwise.
+bool text_quantity(const std::string& text, double& value, char& kind) {
+    const char* begin = text.c_str();
+    char* end = nullptr;
+    const double v = std::strtod(begin, &end);
+    if (end == begin || !std::isfinite(v)) return false;
+    const std::string unit = trim(std::string(end));
+    if (unit == "Hz") value = v, kind = 'f';
+    else if (unit == "kHz") value = v * 1000, kind = 'f';
+    else if (unit == "ms") value = v, kind = 't';
+    else if (unit == "s" || unit == "sec") value = v * 1000, kind = 't';
+    else return false;
+    return true;
+}
+}  // namespace
+
+double linear_wide_taper_ratio(const ParamDesc& p) {
+    if (p.steps > 0 || p.log_scale) return 0;
+    std::array<double, 5> v{};
+    char kind = 0;
+    for (std::size_t k = 0; k < 5; ++k) {
+        char kk = 0;
+        if (!text_quantity(trim(p.texts[k]), v[k], kk) || (kind && kk != kind)) return 0;
+        kind = kk;
+    }
+    if (!(v[0] > 0) || !(v[4] > v[0])) return 0;
+    const double ratio = v[4] / v[0];
+    if (ratio < 100) return 0;
+    // Linear: the quarter points sit where a straight line puts them (within 5 % of the span) [D].
+    const double span = v[4] - v[0];
+    for (std::size_t k = 1; k < 4; ++k)
+        if (std::abs(v[k] - (v[0] + span * double(k) / 4.0)) > 0.05 * span) return 0;
+    return ratio;
 }
 
 bool use_log_scale(double min, double max, int steps, const std::string& units) {

@@ -29,6 +29,7 @@
 #include "opt/Fingerprint.hpp"
 #include "opt/Objective.hpp"
 #include "opt/Pipeline.hpp"
+#include "opt/PitchCalibration.hpp"
 #include "opt/Probe.hpp"
 #include "opt/Profile.hpp"
 #include "opt/Space.hpp"
@@ -385,6 +386,26 @@ int cmd_fit(const Args& a) {
     so.pin_pitch = pitched;
     const auto space = opt::Space::build(p.params, p.info.format, profile ? &*profile : nullptr, so);
 
+    // How the plugin takes the cents (spec 02 section 5): from the profile, else three calibration renders.
+    opt::PitchCalibration pitch;
+    bool pitch_measured = false;
+    if (pitched) {
+        if (stored && stored->pitch.method != opt::PitchMethod::Unknown) {
+            pitch = stored->pitch;
+        } else {
+            host::Job cj = job;
+            cj.coords = space.defaults();
+            pitch = opt::calibrate_pitch(p.batch(), cj);
+            pitch_measured = pitch.method != opt::PitchMethod::Unknown;
+        }
+        opt::apply_pitch_method(pitch, job);
+        std::fputs(std::format("pitch: {}{}\n", to_string(pitch.method),
+                               pitch.method == opt::PitchMethod::Bend ? std::format(" (bend range {:.2f} semitones)", pitch.bend_range)
+                               : pitch.method == opt::PitchMethod::NearestKey
+                                   ? std::format(" ({:+.1f} cents cannot be played)", an.cents)
+                                   : std::string()).c_str(), stdout);
+    }
+
     auto weights = features::Weights::preset(an.kind);
     for (const auto& [k, v] : a.opts)
         if (k.rfind("--w-", 0) == 0 && !weights.set(k.substr(4), a.num(k, 0))) return fail("fit", "unknown weight " + k);
@@ -427,7 +448,7 @@ int cmd_fit(const Args& a) {
                            p.workers(), to_string(so.mode)).c_str(), stdout);
     const auto res = opt::run_pipeline(obj, space, po, seeds);
     // Learned and updated constraints go back into the profile (spec 05 section 4), even when the fit failed.
-    if (!constraints.empty() || (stored && !stored->constraints.empty())) {
+    if (!constraints.empty() || (stored && !stored->constraints.empty()) || pitch_measured) {
         opt::Profile out = stored ? *stored : opt::Profile{};
         if (!stored) {
             out.format = p.info.format;
@@ -437,6 +458,7 @@ int cmd_fit(const Args& a) {
             out.version_hash = p.info.version_hash;
         }
         out.constraints = constraints.constraints();
+        if (pitch_measured) out.pitch = pitch;
         const auto path = opt::Profile::default_path(profiles_dir(a), p.info);
         if (auto r = out.save(path); !r) std::fputs(std::format("note: {}\n", r.error()).c_str(), stderr);
     }
@@ -558,6 +580,18 @@ int cmd_fit(const Args& a) {
     hz.set("skipped", static_cast<std::int64_t>(res.skipped));
     result.set("constraints", std::move(hz));
     result.set("failure_reports", static_cast<std::int64_t>(res.failures.size()));
+    double residual = 0;
+    if (pitched) {
+        if (auto audio = obj.render(res.best.coords)) residual = opt::pitch_residual_cents(*audio, an.f0);
+        json::Value pj;
+        pj.set("method", std::string(to_string(pitch.method)));
+        pj.set("bend_range", pitch.bend_range);
+        pj.set("target_f0", an.f0);
+        pj.set("key", an.key);
+        pj.set("cents", an.cents);
+        pj.set("residual_cents", residual);  // measured pitch of the match against the target (spec 02 section 5)
+        result.set("pitch", std::move(pj));
+    }
     json::Array topk;
     for (const auto& t : res.top_k) topk.push_back(t.eval.loss);
     result.set("top_k_loss_db", json::Value(std::move(topk)));
@@ -570,6 +604,7 @@ int cmd_fit(const Args& a) {
     for (const auto& [o, n] : res.outcomes)
         if (o != Outcome::Ok) summary += std::format("  {} {} candidate(s)\n", n, to_string(o));
     for (const auto& c : res.learned) summary += "  learned: " + c.describe() + "\n";
+    if (pitched) summary += std::format("  pitch: {}, residual {:+.1f} cents\n", to_string(pitch.method), residual);
     if (res.resampled + res.skipped > 0)
         summary += std::format("  {} sample(s) redrawn and {} seed point(s) skipped inside known constraints\n",
                                res.resampled, res.skipped);

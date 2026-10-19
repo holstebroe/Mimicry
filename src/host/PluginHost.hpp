@@ -88,6 +88,9 @@ struct Job {
     double tail_max_ms = 8000;
     double peak_limit = 50;      // spec 05 section 2 [S: Acidus]
     bool allow_silent = false;   // the target itself is silent
+    // > 0: a note's cents go out as MIDI pitch bend with this measured range in semitones instead of the
+    // format's tuning (spec 02 section 5, for plugins that ignore tuning). Bend is channel-wide.
+    double bend_range = 0;
 };
 
 struct Audio {

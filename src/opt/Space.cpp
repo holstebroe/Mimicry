@@ -5,11 +5,13 @@
 #include <cmath>
 #include <string_view>
 
+#include "host/ParamUtil.hpp"
+
 namespace mimicry::opt {
 
 namespace {
 
-constexpr double kWarpRatio = 100.0;  // log warp: u = (r^x - 1) / (r - 1) [D]
+constexpr double kWarpRatio = 100.0;  // log warp from the probe: u = (r^x - 1) / (r - 1) [D]
 
 std::string lower(std::string_view s) {
     std::string out(s);
@@ -90,6 +92,12 @@ Space Space::build(const std::vector<host::ParamDesc>& params, host::PluginForma
             // OQ9: clap-wrapper exposes a 20 Hz - 20 kHz cutoff linearly in its normalised value).
             slot.warp_log = prof->response == Response::Log && p.steps == 0 && !p.log_scale;
         }
+        // The plugin's own texts show a linear taper over decades of Hz or ms: the exact log warp of that ratio,
+        // probe or not (spec 04 section 9) [A].
+        if (const double r = host::linear_wide_taper_ratio(p); r > 0) {
+            slot.warp_log = true;
+            slot.warp_ratio = std::min(r, 1e5);
+        }
         if (p.steps >= 2 && p.steps <= options.max_categorical_values && (p.steps == 2 || !texts_numeric(p)) &&
             p.units.empty())
             slot.role = Role::Categorical;
@@ -165,13 +173,15 @@ double snap_to_grid(int steps, double u) noexcept {
 double Space::snap(std::size_t index, double u) const { return snap_to_grid(slots_[index].steps, u); }
 
 double Space::to_u(std::size_t index, double x) const {
-    if (!slots_[index].warp_log) return x;
-    return (std::pow(kWarpRatio, x) - 1.0) / (kWarpRatio - 1.0);
+    const Slot& s = slots_[index];
+    if (!s.warp_log) return x;
+    return (std::pow(s.warp_ratio, x) - 1.0) / (s.warp_ratio - 1.0);
 }
 
 double Space::to_x(std::size_t index, double u) const {
-    if (!slots_[index].warp_log) return u;
-    return std::log1p(std::max(u, 0.0) * (kWarpRatio - 1.0)) / std::log(kWarpRatio);
+    const Slot& s = slots_[index];
+    if (!s.warp_log) return u;
+    return std::log1p(std::max(u, 0.0) * (s.warp_ratio - 1.0)) / std::log(s.warp_ratio);
 }
 
 double Space::decode(const std::vector<std::size_t>& free, const std::vector<double>& x, std::vector<double>& coords) const {

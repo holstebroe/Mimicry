@@ -17,12 +17,14 @@
 #endif
 
 #include "features/Loss.hpp"
+#include "features/Pitch.hpp"
 #include "host/ParamUtil.hpp"
 #include "opt/Constraints.hpp"
 #include "output/FailureReport.hpp"
 #include "opt/Fingerprint.hpp"
 #include "opt/Objective.hpp"
 #include "opt/Pipeline.hpp"
+#include "opt/PitchCalibration.hpp"
 #include "opt/Probe.hpp"
 #include "opt/Space.hpp"
 #include "supervisor/WorkerPool.hpp"
@@ -105,6 +107,32 @@ int main(int argc, char** argv) {
     const auto* hang = entry(*prof, ts::kHazHang);
     check(hang && hang->outcomes.back() == Outcome::Timeout && hang->safe_hi == 0.75, "probe: the hang hazard is a timeout");
     check(!prof->pairs.empty(), "probe: pair interactions measured");
+    check(prof->pitch.method == PitchMethod::Tuning && std::abs(prof->pitch.tuning_cents - 50) < 3,
+          std::format("probe: the plugin takes tuning ({} {:.1f} cents)", to_string(prof->pitch.method), prof->pitch.tuning_cents));
+    {
+        // Spec 02 section 5: with tuning ignored, a full MIDI pitch bend measures the bend range (set to 7).
+        host::Job cj = job;
+        for (const auto& q : params) cj.coords.push_back(q.default_coord);
+        cj.coords[ts::kIgnoreTuning] = 1.0;
+        cj.coords[ts::kBendRange] = info.format == host::PluginFormat::Clap ? host::plain_to_coord(params[ts::kBendRange], 7.0)
+                                                                            : (7.0 - 1.0) / 23.0;
+        const auto bc = calibrate_pitch(render, cj);
+        check(bc.method == PitchMethod::Bend && std::abs(bc.bend_range - 7.0) < 0.1,
+              std::format("pitch: bend measured when tuning is ignored ({} range {:.3f}, tuning {:.1f} cents)",
+                          to_string(bc.method), bc.bend_range, bc.tuning_cents));
+        // The bend plays the cents: 30 cents through a 7-semitone bend lands within 3 cents.
+        auto played = cj;
+        played.notes[0].cents = 30;
+        apply_pitch_method(bc, played);
+        const auto r = render({cj, played});
+        if (r.size() == 2 && r[0] && r[1]) {
+            const double f0 = features::estimate_f0(mono_of(*r[0]), job.sample_rate).f0;
+            const double res = pitch_residual_cents(*r[1], f0 * std::pow(2.0, 30.0 / 1200.0));
+            check(std::abs(res) < 3, std::format("pitch: 30 cents through the bend, residual {:+.2f} cents", res));
+        } else {
+            check(false, "pitch: bend renders");
+        }
+    }
     for (auto id : {ts::kHazNan, ts::kHazHang, ts::kHazPoison, ts::kHazSticky, ts::kHazThrow}) {
         const auto* e = entry(*prof, id);
         check(e && e->dead() && e->outcomes.back() != Outcome::Ok && e->safe_hi == 0.75,
@@ -259,19 +287,30 @@ int main(int argc, char** argv) {
     opt.max_evals = 4000;
     opt.time_cap_s = 240;
     opt.seed_samples = 150;
-    opt.restarts = 2;
-    opt.seed = 3;
+    opt.restarts = std::getenv("FIT_R") ? std::atoi(std::getenv("FIT_R")) : 2;
+    opt.seed = std::getenv("FIT_SEED") ? std::uint64_t(std::atoll(std::getenv("FIT_SEED"))) : 3;
     opt.log = [](const std::string& s) { std::printf("  %s\n", s.c_str()); };
     const auto res = run_pipeline(obj, space, opt);
     std::printf("fit: loss %.3f dB after %ld evals in %.1f s (cache hits %zu); cutoff %.3f (truth %.3f), sustain %.3f "
                 "(truth %.3f), wave %.0f\n", res.best.eval.loss, res.evals, res.seconds, obj.cache().hits(),
                 res.best.coords[ts::kCutoff], truth[ts::kCutoff], res.best.coords[ts::kSustain], truth[ts::kSustain],
                 res.best.coords[ts::kWave]);
+    for (auto i : space.active())
+        std::printf("  %-12s found %.3f (%s)  truth %.3f (%s)\n", params[i].name.c_str(), res.best.coords[i],
+                    p0.value_text(params[i].id, res.best.coords[i]).c_str(), truth[i], p0.value_text(params[i].id, truth[i]).c_str());
+    for (const auto& st : res.stages)
+        std::printf("  stage %-22s %2d free %8.3f -> %8.3f dB %6ld evals %5.1f s\n", st.name.c_str(), st.free, st.before, st.after,
+                    st.evals, st.seconds);
     auto played = truth;  // the true preset with its pitch moved from the detune parameter to the note
     played[ts::kDetune] = space.defaults()[ts::kDetune];
     const auto self = obj.evaluate({played}, false);
     std::printf("  loss of the true preset played at the measured pitch: %.3f dB\n", self[0].loss);
     check(res.best.eval.ok() && res.best.eval.loss < 1.0, "fit recovers the preset (loss under 1 dB)");
+    if (auto best = obj.render(res.best.coords)) {
+        const double residual = pitch_residual_cents(*best, an.f0);
+        std::printf("  pitch residual of the match: %+.2f cents\n", residual);
+        check(std::abs(residual) < 3, "fit: the match's pitch is within 3 cents of the target");
+    }
     check(res.best.coords[ts::kWave] == 1.0, "fit: wave (categorical) recovered");
     const double cutoff_hz = std::atof(p0.value_text(ts::kCutoff, res.best.coords[ts::kCutoff]).c_str());
     std::printf("  cutoff found: %.0f Hz (truth 1500 Hz)\n", cutoff_hz);

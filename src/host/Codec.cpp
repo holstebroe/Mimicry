@@ -16,7 +16,7 @@ json::Value to_json(const Job& job) {
     json::Value v;
     v.set("coords", std::move(coords)).set("notes", std::move(notes)).set("sample_rate", job.sample_rate)
         .set("block_size", job.block_size).set("settle_ms", job.settle_ms).set("tail_max_ms", job.tail_max_ms)
-        .set("peak_limit", job.peak_limit).set("allow_silent", job.allow_silent);
+        .set("peak_limit", job.peak_limit).set("allow_silent", job.allow_silent).set("bend_range", job.bend_range);
     return v;
 }
 
@@ -39,6 +39,7 @@ expected<Job, std::string> job_from_json(const json::Value& v) {
     job.tail_max_ms = v["tail_max_ms"].as_number(8000);
     job.peak_limit = v["peak_limit"].as_number(50);
     job.allow_silent = v["allow_silent"].as_bool();
+    job.bend_range = v["bend_range"].as_number(0);
     if (job.sample_rate < 8000 || job.sample_rate > 384000) return unexpected(std::string("job: bad sample rate"));
     if (job.block_size < 1 || job.block_size > 65536) return unexpected(std::string("job: bad block size"));
     return job;

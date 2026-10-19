@@ -102,6 +102,14 @@ void handle_event(Plugin& pl, const clap_event_header_t* h) {
             pl.synth.note_off(e->key, e->note_id);
             break;
         }
+        case CLAP_EVENT_MIDI: {
+            const auto* e = reinterpret_cast<const clap_event_midi_t*>(h);
+            if ((e->data[0] & 0xF0) == 0xE0) {
+                const int v = (int(e->data[2]) << 7) | int(e->data[1]);  // 0..16383, centre 8192
+                pl.synth.pitch_bend(double(v - 8192) / 8192.0);
+            }
+            break;
+        }
         case CLAP_EVENT_NOTE_EXPRESSION: {
             const auto* e = reinterpret_cast<const clap_event_note_expression_t*>(h);
             if (e->expression_id == CLAP_NOTE_EXPRESSION_TUNING) pl.synth.note_tuning(e->key, e->note_id, e->value);
@@ -141,7 +149,9 @@ uint32_t note_ports_count(const clap_plugin_t*, bool is_input) { return is_input
 bool note_ports_get(const clap_plugin_t*, uint32_t index, bool is_input, clap_note_port_info_t* info) {
     if (!is_input || index != 0) return false;
     info->id = 0;
-    info->supported_dialects = CLAP_NOTE_DIALECT_CLAP;
+    // MIDI too, for pitch bend (spec 02 section 5). The VST3 build (clap-wrapper) then maps MIDI controllers
+    // through IMidiMapping and adds a MIDI program-change parameter.
+    info->supported_dialects = CLAP_NOTE_DIALECT_CLAP | CLAP_NOTE_DIALECT_MIDI;
     info->preferred_dialect = CLAP_NOTE_DIALECT_CLAP;
     std::snprintf(info->name, sizeof info->name, "Notes");
     return true;

@@ -127,6 +127,7 @@ add_library(mimicry_opt STATIC
     src/opt/Embedding.cpp
     src/opt/Fingerprint.cpp
     src/opt/Objective.cpp
+    src/opt/PitchCalibration.cpp
     src/opt/Pipeline.cpp
     src/opt/Probe.cpp
     src/opt/Profile.cpp

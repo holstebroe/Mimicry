@@ -16,6 +16,7 @@
 #include "core/ParamSemantics.hpp"
 #include "host/PluginHost.hpp"
 #include "opt/Constraints.hpp"
+#include "opt/PitchCalibration.hpp"
 
 namespace mimicry::opt {
 
@@ -57,6 +58,7 @@ struct Profile {
     std::vector<ParamProfile> params;
     std::vector<PairProfile> pairs;
     std::vector<Constraint> constraints;  // learned by failure bisection (spec 05 section 4), kept by `probe`
+    PitchCalibration pitch;               // how the plugin takes fine pitch (spec 02 section 5)
 
     // False for a profile that only carries constraints (written by a fit before any probe).
     [[nodiscard]] bool probed() const noexcept { return !params.empty(); }

@@ -43,6 +43,7 @@ struct Slot {
     int steps = 0;           // > 1 for stepped and categorical
     double lo = 0, hi = 1;   // safe box in u
     bool warp_log = false;
+    double warp_ratio = 100;  // r of the log warp u = (r^x - 1) / (r - 1)
     std::string why;         // reason a parameter is fixed
 };
 
