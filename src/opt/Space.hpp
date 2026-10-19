@@ -40,6 +40,7 @@ struct Slot {
     Role role = Role::Free;
     ParamGroup group = ParamGroup::Unknown;  // stage group: names, or the probe in hybrid mode
     Semantics names;
+    RoleGuess param_role;    // what it does (cutoff, attack, ...): name guess, or the probe-confirmed one
     int steps = 0;           // > 1 for stepped and categorical
     double lo = 0, hi = 1;   // safe box in u
     bool warp_log = false;

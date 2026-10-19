@@ -210,6 +210,7 @@ expected<Profile, std::string> probe(const RenderBatch& render, const host::Plug
         q.id = p.id;
         q.name = p.name;
         q.names = classify_param(p.name, p.module, p.units);
+        q.role = guess_role(p.name, p.module, p.units, p.steps);
         std::array<Scores, 5> sc{};
         std::array<Descriptor, 5> ds{};
         bool all_ok = true;
@@ -286,6 +287,7 @@ expected<Profile, std::string> probe(const RenderBatch& render, const host::Plug
             if (q.outcomes[k] != Outcome::Ok) break;
             q.safe_hi = kProbeU[k];
         }
+        q.role = confirm_role(q.role, q.measured);  // spec 04 section 2: the probe confirms or doubts the name
         prof.params.push_back(std::move(q));
     }
 

@@ -79,9 +79,11 @@ Space Space::build(const std::vector<host::ParamDesc>& params, host::PluginForma
         slot.steps = p.steps;
         slot.names = classify_param(p.name, p.module, p.units);
         slot.group = slot.names.group;
+        slot.param_role = guess_role(p.name, p.module, p.units, p.steps);
         s.defaults_[i] = std::clamp(p.default_coord, 0.0, 1.0);
         const ParamProfile* prof = profile ? profile->find(p) : nullptr;
         if (prof) {
+            slot.param_role = prof->role;
             slot.lo = std::clamp(prof->safe_lo, 0.0, 1.0);
             slot.hi = std::clamp(prof->safe_hi, slot.lo, 1.0);
             // Hybrid: a measured signature overrides the name guess (spec 04 section 2).
@@ -92,6 +94,8 @@ Space Space::build(const std::vector<host::ParamDesc>& params, host::PluginForma
             // OQ9: clap-wrapper exposes a 20 Hz - 20 kHz cutoff linearly in its normalised value).
             slot.warp_log = prof->response == Response::Log && p.steps == 0 && !p.log_scale;
         }
+        // A role the name gave a group to stage by, when the group words did not (spec 04 section 2).
+        if (slot.group == ParamGroup::Unknown && slot.param_role.confidence >= 0.5) slot.group = group_of(slot.param_role.role);
         // The plugin's own texts show a linear taper over decades of Hz or ms: the exact log warp of that ratio,
         // probe or not (spec 04 section 9) [A].
         if (const double r = host::linear_wide_taper_ratio(p); r > 0) {

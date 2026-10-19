@@ -107,6 +107,11 @@ int main(int argc, char** argv) {
     const auto* hang = entry(*prof, ts::kHazHang);
     check(hang && hang->outcomes.back() == Outcome::Timeout && hang->safe_hi == 0.75, "probe: the hang hazard is a timeout");
     check(!prof->pairs.empty(), "probe: pair interactions measured");
+    auto role = [&](ts::ParamId id) { return entry(*prof, id) ? entry(*prof, id)->role : RoleGuess{}; };
+    check(role(ts::kCutoff).role == ParamRole::Cutoff && role(ts::kCutoff).confidence > 0.9 &&
+              role(ts::kRelease).role == ParamRole::Release && role(ts::kDetune).role == ParamRole::Detune &&
+              role(ts::kLevel).role == ParamRole::Volume,
+          "probe: roles guessed and confirmed (cutoff, release, detune, volume)");
     // Spec 05 section 6: no smoother settles at once; a 100 ms one-pole glide needs roughly half a second.
     check(prof->settle_ms > 0 && prof->settle_ms <= 25, std::format("settle without smoothing: {:.0f} ms", prof->settle_ms));
     {

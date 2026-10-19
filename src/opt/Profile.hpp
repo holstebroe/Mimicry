@@ -31,10 +31,15 @@ enum class ProbeClass { Dead, Pitch, Brightness, Time, Level, Spectrum, Fx };
 // so the effect is uniform in log) or "exp" (most in the last quarter).
 enum class Response { Linear, Log, Exp };
 
+// Whether a measured class fits a role (spec 04 section 2): a confirmed role gains confidence, a contradicted one
+// loses most of it, a dead parameter (nothing to see at the defaults) leaves it as guessed [D].
+[[nodiscard]] RoleGuess confirm_role(RoleGuess guess, ProbeClass measured) noexcept;
+
 struct ParamProfile {
     std::uint32_t id = 0;
     std::string name;
     Semantics names;                 // the name guess
+    RoleGuess role;                  // role from name + units, confirmed or doubted by the probe
     ProbeClass measured = ProbeClass::Spectrum;
     double effect = 0;               // largest embedding change over the floor-based threshold
     Response response = Response::Linear;

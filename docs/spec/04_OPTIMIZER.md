@@ -34,6 +34,17 @@ roughly log-linearly, a release changes only the decay after note-off, an attack
 a mix crossfades with the dry input. A measured signature that contradicts the name drops the role's
 confidence. Roles drive the parameter map (§8), the doctor report (08) and the stage order.
 
+Implemented [A]: `guess_role` (`core/ParamSemantics`) checks specific words first (cutoff, attack,
+threshold, ...), then words that need a context (rate or depth in an LFO, freq or Q in a filter or EQ, an
+amount of a filter envelope, a time in a delay), then units alone (Hz outside an LFO is a weak cutoff
+guess, 0.35); confidences 0.35-0.9 [D]. The probe's first version of the confirmation works on the
+measured class: each role lists the classes it can produce (a cutoff on a pure tone changes the level,
+an attack lowers it too); a fitting class multiplies the confidence by 1.25 (capped at 1), a
+contradicting one by 0.4, a dead parameter keeps the guess [D]. The finer signatures above (release
+only after note-off, attack only the onset slope) come with the doctor's per-parameter views (WP8.2).
+The profile stores role and confidence per parameter; `list` shows them; a role with confidence >= 0.5
+gives its group to a parameter whose name named none, for the stage order.
+
 Names are **priors only**. The probe (§3) measures what each parameter does, and a measured signature
 overrides a name guess. Names help most for ordering stages and for the first sigma. Pitch-only
 parameters are pinned when S0 applies the target's pitch (§9).

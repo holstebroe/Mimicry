@@ -231,13 +231,15 @@ int cmd_list(const Args& a) {
     std::string out = std::format("{} {} ({}), uid {}, version {}\n", host::to_string(p.info.format), p.info.name,
                                   p.info.vendor, p.info.uid, p.info.version_hash);
     const auto space = opt::Space::build(p.params, p.info.format, profile ? &*profile : nullptr, opt::SpaceOptions{});
-    out += std::format("{:>8}  {:<24} {:<14} {:<6} {:>5}  {:<12} {:<12} {}\n", "id", "name", "module", "units", "steps",
-                       "group", "role", "flags");
+    out += std::format("{:>8}  {:<24} {:<14} {:<6} {:>5}  {:<12} {:<22} {:<12} {}\n", "id", "name", "module", "units", "steps",
+                       "group", "param role", "search", "flags");
     for (std::size_t i = 0; i < p.params.size(); ++i) {
         const auto& d = p.params[i];
         const auto& s = space.slot(i);
-        out += std::format("{:>8}  {:<24} {:<14} {:<6} {:>5}  {:<6} {:.2f}  {:<12} {}{}\n", d.id, d.name, d.module, d.units,
-                           d.steps, to_string(s.group), s.names.confidence, to_string(s.role), flags_text(d.flags),
+        const auto pr = s.param_role.role == ParamRole::None ? std::string("-")
+                                                             : std::format("{} {:.2f}", to_string(s.param_role.role), s.param_role.confidence);
+        out += std::format("{:>8}  {:<24} {:<14} {:<6} {:>5}  {:<6} {:.2f}  {:<22} {:<12} {}{}\n", d.id, d.name, d.module, d.units,
+                           d.steps, to_string(s.group), s.names.confidence, pr, to_string(s.role), flags_text(d.flags),
                            s.why.empty() ? "" : "(" + s.why + ")");
     }
     std::fputs(out.c_str(), stdout);

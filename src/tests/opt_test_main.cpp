@@ -183,6 +183,43 @@ void test_semantics() {
               !is_pitch_param("Detune"), "pitch parameter names");
     check(is_seed_param("LFO Seed") && is_seed_param("Random Phase") && !is_seed_param("Cutoff"), "seed detection");
     check(parse_group("filter") == ParamGroup::Filter && to_string(ParamGroup::Env) == "env", "group names");
+
+    // Roles (spec 04 section 2): name, module and units.
+    struct Case {
+        const char *name, *module, *units;
+        int steps;
+        ParamRole want;
+    };
+    const Case cases[] = {
+        {"Cutoff", "", "Hz", 0, ParamRole::Cutoff},          {"Freq", "Filter 1", "Hz", 0, ParamRole::Cutoff},
+        {"Resonance", "", "", 0, ParamRole::Resonance},      {"Filter Env Amount", "", "", 0, ParamRole::FilterEnvAmount},
+        {"Env Amt", "VCF", "", 0, ParamRole::FilterEnvAmount}, {"Key Track", "Filter", "%", 0, ParamRole::FilterKeyTrack},
+        {"Amp Attack", "", "ms", 0, ParamRole::Attack},      {"Decay", "Env 2", "ms", 0, ParamRole::Decay},
+        {"Sustain", "", "%", 0, ParamRole::Sustain},         {"Release", "", "ms", 0, ParamRole::Release},
+        {"LFO 1 Rate", "", "Hz", 0, ParamRole::LfoRate},     {"Depth", "LFO", "", 0, ParamRole::LfoDepth},
+        {"Osc 2 Detune", "", "cents", 0, ParamRole::Detune}, {"Octave", "Osc 1", "", 5, ParamRole::CoarseTune},
+        {"Fine Tune", "", "cents", 0, ParamRole::FineTune},  {"Waveform", "Osc 1", "", 4, ParamRole::OscWave},
+        {"Osc 1 Level", "", "dB", 0, ParamRole::OscLevel},   {"Noise", "Mixer", "", 0, ParamRole::NoiseLevel},
+        {"Reverb Mix", "", "%", 0, ParamRole::Mix},          {"Delay Time", "", "ms", 0, ParamRole::Time},
+        {"Feedback", "Delay", "%", 0, ParamRole::Feedback},  {"Room Size", "Reverb", "", 0, ParamRole::Size},
+        {"Damping", "Reverb", "", 0, ParamRole::Damping},    {"Threshold", "Compressor", "dB", 0, ParamRole::Threshold},
+        {"Ratio", "Compressor", "", 0, ParamRole::Ratio},    {"Makeup", "Compressor", "dB", 0, ParamRole::Makeup},
+        {"Low Gain", "EQ", "dB", 0, ParamRole::EqGain},      {"Mid Freq", "EQ", "Hz", 0, ParamRole::EqFreq},
+        {"Master Volume", "", "dB", 0, ParamRole::Volume},   {"Pan", "", "", 0, ParamRole::Pan},
+        {"Drive", "", "", 0, ParamRole::Drive},              {"Filter Type", "", "", 4, ParamRole::FilterType},
+        {"Gizmo", "", "", 0, ParamRole::None},
+    };
+    for (const auto& c : cases) {
+        const auto g = guess_role(c.name, c.module, c.units, c.steps);
+        check(g.role == c.want, std::string("role of '") + c.name + "' in '" + c.module + "': " + std::string(to_string(g.role)));
+    }
+    check(parse_role("filter_env_amount") == ParamRole::FilterEnvAmount && group_of(ParamRole::Release) == ParamGroup::Env,
+          "role names and groups");
+    // The probe confirms a fitting class, doubts a contradicting one, and leaves a dead one alone.
+    const RoleGuess cut{ParamRole::Cutoff, 0.8};
+    check(opt::confirm_role(cut, opt::ProbeClass::Brightness).confidence > 0.8, "role confirmed by its class");
+    check(opt::confirm_role(cut, opt::ProbeClass::Pitch).confidence < 0.5, "role doubted by a contradicting class");
+    check(opt::confirm_role(cut, opt::ProbeClass::Dead).confidence == 0.8, "dead leaves the role as guessed");
 }
 
 host::ParamDesc param(std::uint32_t id, std::string name, int steps = 0, double def = 0.5, std::string units = "",
