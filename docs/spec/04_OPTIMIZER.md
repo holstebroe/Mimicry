@@ -34,6 +34,17 @@ roughly log-linearly, a release changes only the decay after note-off, an attack
 a mix crossfades with the dry input. A measured signature that contradicts the name drops the role's
 confidence. Roles drive the parameter map (§8), the doctor report (08) and the stage order.
 
+Implemented [A]: `guess_role` (`core/ParamSemantics`) checks specific words first (cutoff, attack,
+threshold, ...), then words that need a context (rate or depth in an LFO, freq or Q in a filter or EQ, an
+amount of a filter envelope, a time in a delay), then units alone (Hz outside an LFO is a weak cutoff
+guess, 0.35); confidences 0.35-0.9 [D]. The probe's first version of the confirmation works on the
+measured class: each role lists the classes it can produce (a cutoff on a pure tone changes the level,
+an attack lowers it too); a fitting class multiplies the confidence by 1.25 (capped at 1), a
+contradicting one by 0.4, a dead parameter keeps the guess [D]. The finer signatures above (release
+only after note-off, attack only the onset slope) come with the doctor's per-parameter views (WP8.2).
+The profile stores role and confidence per parameter; `list` shows them; a role with confidence >= 0.5
+gives its group to a parameter whose name named none, for the stage order.
+
 Names are **priors only**. The probe (§3) measures what each parameter does, and a measured signature
 overrides a name guess. Names help most for ordering stages and for the first sigma. Pitch-only
 parameters are pinned when S0 applies the target's pitch (§9).
@@ -144,7 +155,13 @@ and `src/opt` use these [D] unless noted:
 - **Warp.** A parameter whose probe response is `log` (more than half of the change in the first quarter of
   u) is searched in `x` with `u = (100^x − 1) / 99`, unless the backend already decodes it in log. This
   applies to **both** formats: the clap-wrapper build of the test synth exposes its 20 Hz-20 kHz cutoff
-  linearly in the VST3 normalised value, which the probe flags (plan OQ9).
+  linearly in the VST3 normalised value, which the probe flags (plan OQ9). The probe misses a time
+  parameter it classes by level (a long attack lowers the level, linearly), so the plugin's own value texts
+  decide too [A]: a continuous parameter whose texts at 0/25/50/75/100 % read as Hz/kHz or ms/s, lie on a
+  straight line (each quarter point within 5 % of the span) and span at least a factor 100, is searched with
+  the exact log map of that ratio, `u = (r^x − 1) / (r − 1)` with `r = max / min` (capped at 10^5), probe or
+  not. Measured: the VST3 test fit put Attack (1 ms - 2 s, linear) at 1064 ms instead of 5 ms on 2 of 6
+  seeds (2.06 dB); with the text warp all 6 seeds end below 0.6 dB.
 - **Boundary penalty.** 100 dB per unit² of clip distance in `x`, added to the CMA-ES fitness only (the
   rendered point is the clipped one).
 - **Invalid candidates** rank after all valid ones as `10^6 + 10^4 · severity + 100 · distance` to the run's
@@ -174,7 +191,10 @@ and `src/opt` use these [D] unless noted:
 - **Probe.** Descriptors per render: centroid, f0 (confidence >= 0.5), peak to −20 dB decay, onset to
   −60 dB tail, flatness, level, embedding. Unit scores: 20 cents, 0.15 octave, 0.25 in log2 time, 1.5 dB;
   f0 changes by a small-integer ratio are estimator jumps, not pitch. Dead: embedding change at most
-  `max(3 · floor, 0.15)`, level within 0.5 dB, pitch within 5 cents, and nothing failed. Otherwise the
+  `max(3 · floor, 0.15)`, level within 0.5 dB, pitch within 5 cents at every value that rendered; values
+  that failed do not keep a parameter alive (a hazard switch that only fails at its top is frozen at its
+  default, which rendered, and its failures stay in the profile) [A: measured, a zero-effect hazard left
+  in the search cost the WP4 test fit 2-3 dB]. Otherwise the
   largest score >= 1 wins (`fx` when the tail grows twice as much as the decay and flatness moves 1.5 dB),
   else `spectrum`. The safe box is the run of good probe values on each side of the default; a
   failure next to the default narrows that side to the default itself [A]. Pairs: the 10

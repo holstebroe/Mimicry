@@ -124,6 +124,125 @@ Semantics classify_param(std::string_view name, std::string_view module, std::st
     return {ParamGroup(arg), std::clamp(0.3 + 0.6 * strength * (best / total), 0.0, 0.95)};
 }
 
+namespace {
+
+constexpr std::string_view kRoleNames[] = {
+    "none", "cutoff", "resonance", "filter_env_amount", "filter_key_track", "filter_type", "attack", "decay",
+    "sustain", "release", "osc_wave", "osc_level", "detune", "coarse_tune", "fine_tune", "unison", "noise_level",
+    "lfo_rate", "lfo_depth", "drive", "mix", "feedback", "time", "size", "damping", "threshold", "ratio", "makeup",
+    "eq_freq", "eq_gain", "eq_q", "volume", "pan"};
+
+}  // namespace
+
+std::string_view to_string(ParamRole role) noexcept { return kRoleNames[std::size_t(role)]; }
+
+ParamRole parse_role(std::string_view text) noexcept {
+    for (std::size_t r = 0; r < std::size(kRoleNames); ++r)
+        if (kRoleNames[r] == text) return ParamRole(r);
+    return ParamRole::None;
+}
+
+ParamGroup group_of(ParamRole role) noexcept {
+    switch (role) {
+        case ParamRole::Cutoff:
+        case ParamRole::Resonance:
+        case ParamRole::FilterEnvAmount:
+        case ParamRole::FilterKeyTrack:
+        case ParamRole::FilterType:
+        case ParamRole::Drive: return ParamGroup::Filter;
+        case ParamRole::Attack:
+        case ParamRole::Decay:
+        case ParamRole::Sustain:
+        case ParamRole::Release: return ParamGroup::Env;
+        case ParamRole::OscWave:
+        case ParamRole::OscLevel:
+        case ParamRole::Detune:
+        case ParamRole::CoarseTune:
+        case ParamRole::FineTune:
+        case ParamRole::Unison:
+        case ParamRole::NoiseLevel: return ParamGroup::Osc;
+        case ParamRole::LfoRate:
+        case ParamRole::LfoDepth: return ParamGroup::Lfo;
+        case ParamRole::Mix:
+        case ParamRole::Feedback:
+        case ParamRole::Time:
+        case ParamRole::Size:
+        case ParamRole::Damping:
+        case ParamRole::Threshold:
+        case ParamRole::Ratio:
+        case ParamRole::Makeup:
+        case ParamRole::EqFreq:
+        case ParamRole::EqGain:
+        case ParamRole::EqQ: return ParamGroup::Fx;
+        case ParamRole::Volume:
+        case ParamRole::Pan: return ParamGroup::Amp;
+        case ParamRole::None: break;
+    }
+    return ParamGroup::Unknown;
+}
+
+RoleGuess guess_role(std::string_view name, std::string_view module, std::string_view units, int steps) {
+    const auto n = tokens(name);
+    const auto m = tokens(module);
+    auto in = [](const std::vector<std::string>& t, std::initializer_list<std::string_view> words) {
+        for (const auto& x : t)
+            for (auto w : words)
+                if (x == w) return true;
+        return false;
+    };
+    auto name_has = [&](std::initializer_list<std::string_view> w) { return in(n, w); };
+    auto ctx_has = [&](std::initializer_list<std::string_view> w) { return in(n, w) || in(m, w); };
+    const bool hz = units == "Hz" || units == "kHz";
+    const bool time_units = units == "ms" || units == "s";
+    const bool filter_ctx = ctx_has({"filter", "flt", "vcf", "lpf", "hpf", "bpf"});
+    const bool lfo_ctx = ctx_has({"lfo", "vibrato", "tremolo"});
+    const bool env_ctx = ctx_has({"env", "envelope", "eg", "adsr"});
+    const bool eq_ctx = ctx_has({"eq", "band", "low", "mid", "high", "shelf", "peak", "bell"});
+    const bool comp_ctx = ctx_has({"comp", "compressor", "dynamics"});
+
+    // Specific words: the name says it outright.
+    if (name_has({"cutoff"})) return {ParamRole::Cutoff, 0.9};
+    if (name_has({"resonance", "reso", "res", "emphasis"})) return {ParamRole::Resonance, 0.85};
+    if (filter_ctx && env_ctx && name_has({"amt", "amount", "depth", "env", "mod", "int", "intensity"}))
+        return {ParamRole::FilterEnvAmount, 0.8};
+    if (name_has({"key", "kbd", "keyboard"}) && name_has({"track", "tracking", "follow", "trk"}))
+        return {ParamRole::FilterKeyTrack, 0.75};
+    if (filter_ctx && name_has({"type", "mode", "slope"}) && steps > 0) return {ParamRole::FilterType, 0.75};
+    if (lfo_ctx && name_has({"rate", "speed", "freq", "frequency", "sync"})) return {ParamRole::LfoRate, 0.85};
+    if (lfo_ctx && name_has({"depth", "amount", "amt", "int", "intensity"})) return {ParamRole::LfoDepth, 0.85};
+    if (name_has({"attack", "atk", "att"})) return {ParamRole::Attack, 0.85};
+    if (name_has({"decay", "dec"}) && !ctx_has({"reverb", "delay"})) return {ParamRole::Decay, 0.85};
+    if (name_has({"sustain", "sus"})) return {ParamRole::Sustain, 0.85};
+    if (name_has({"release", "rel"})) return {ParamRole::Release, 0.85};
+    if (name_has({"detune", "spread"})) return {ParamRole::Detune, 0.8};
+    if (name_has({"unison", "voices"})) return {ParamRole::Unison, 0.75};
+    if (name_has({"coarse", "octave", "oct", "semi", "semitone", "semitones", "transpose"})) return {ParamRole::CoarseTune, 0.8};
+    if (name_has({"fine", "tune", "tuning"})) return {ParamRole::FineTune, 0.75};
+    if (name_has({"wave", "waveform", "shape", "wav"}) && !ctx_has({"lfo"})) return {ParamRole::OscWave, 0.8};
+    if (name_has({"noise"})) return {ParamRole::NoiseLevel, 0.7};
+    if (name_has({"drive", "distortion", "dist", "overdrive", "saturation", "sat"})) return {ParamRole::Drive, 0.8};
+    if (name_has({"threshold", "thresh", "thr"})) return {ParamRole::Threshold, 0.85};
+    if (name_has({"ratio"})) return {ParamRole::Ratio, comp_ctx ? 0.85 : 0.7};
+    if (name_has({"makeup"}) || (name_has({"make"}) && name_has({"up"}))) return {ParamRole::Makeup, 0.85};
+    if (name_has({"feedback", "fb", "regen"})) return {ParamRole::Feedback, 0.85};
+    if (name_has({"damping", "damp", "hfdamp"})) return {ParamRole::Damping, 0.8};
+    if (name_has({"size", "room"})) return {ParamRole::Size, 0.7};
+    if (name_has({"mix", "wet", "dry", "blend"}) && !ctx_has({"osc"})) return {ParamRole::Mix, 0.75};
+    if (name_has({"pan", "balance"})) return {ParamRole::Pan, 0.85};
+    // Words that need a context.
+    if (eq_ctx && name_has({"gain", "boost", "cut"})) return {ParamRole::EqGain, 0.7};
+    if (eq_ctx && name_has({"q", "width", "bw"})) return {ParamRole::EqQ, 0.7};
+    if (eq_ctx && (name_has({"freq", "frequency"}) || hz) && !filter_ctx) return {ParamRole::EqFreq, 0.7};
+    if (name_has({"q"}) && filter_ctx) return {ParamRole::Resonance, 0.7};
+    if ((name_has({"freq", "frequency"}) || hz) && filter_ctx) return {ParamRole::Cutoff, 0.8};
+    if (name_has({"time", "length"}) && (time_units || ctx_has({"delay", "echo", "reverb"}))) return {ParamRole::Time, 0.7};
+    if (ctx_has({"osc", "sub"}) && name_has({"level", "vol", "volume", "gain", "mix"})) return {ParamRole::OscLevel, 0.75};
+    if (name_has({"volume", "vol", "level", "gain", "output", "master"})) return {ParamRole::Volume, 0.65};
+    // Units alone.
+    if (hz && !lfo_ctx) return {ParamRole::Cutoff, 0.35};
+    return {};
+}
+
 bool is_output_level(std::string_view name, std::string_view module) {
     // A level inside an oscillator, envelope or effect module is a mix control, not the output.
     if (has_token(module, {"osc", "env", "lfo", "fx", "filter", "reverb", "delay", "chorus"})) return false;

@@ -91,7 +91,6 @@ struct FeatureExtractor::Impl {
             const long l = long(std::ceil(lo / d)), h = long(std::ceil(hi / d)) - 1;
             if (h >= l && l >= 1) band_ranges.push_back({std::size_t(l), std::size_t(h)});
         }
-        shape_stft = std::make_unique<PowerStft>(2048, 2048);
         if (K > 0) {
             harmt_win = round_size(0.04 * c.sample_rate);
             harmt_fft = next_pow2(harmt_win * 2);
@@ -131,11 +130,10 @@ struct FeatureExtractor::Impl {
             for (int j = 0; j < nmel; ++j) dct[std::size_t(c * nmel + j)] = std::cos(kPi * c * (j + 0.5) / nmel);
     }
 
-    std::vector<float> shape_features(const std::vector<float>& x, std::size_t length) {
+    // `pw`: the 2048-point, hop-512 power STFT (msstft's middle size, the same window and hop), nf frames.
+    std::vector<float> shape_features(const std::vector<float>& pw, std::size_t nf) {
         std::vector<float> out(kShapeDims, 0.0f);
-        const std::size_t hop = 512, nb = shape_stft->bins();
-        const auto pw = shape_stft->power(x.data(), length, hop);
-        const std::size_t nf = shape_stft->frames(length, hop);
+        const std::size_t nb = 2048 / 2 + 1;
         std::vector<double> total(nf, 0.0);
         double max_total = 0;
         for (std::size_t f = 0; f < nf; ++f) {
@@ -208,7 +206,7 @@ struct FeatureExtractor::Impl {
     int K;
     std::vector<PowerStft> msstft;
     std::size_t band_n = 1024;
-    std::unique_ptr<PowerStft> bands_stft, shape_stft, harmt_stft, note_stft;
+    std::unique_ptr<PowerStft> bands_stft, harmt_stft, note_stft;
     std::vector<BinRange> band_ranges;
     std::size_t harmt_win = 0, harmt_fft = 0, note_window = 0;
     std::vector<BinRange> harmt_harm, harmt_gap, note_harm, note_gap;
@@ -237,12 +235,15 @@ FeatureSet FeatureExtractor::extract(const std::vector<float>& mono, std::size_t
     fs.harmonics = harmonics_;
     const int rate = config_.sample_rate;
 
+    static_assert(kMsstftSizes[1] == 2048, "shape reuses the 2048-point msstft");
+    std::vector<float> shape_power;
     for (std::size_t s = 0; s < kMsstftSizes.size(); ++s) {
         const std::size_t n = kMsstftSizes[s], hop = n / 4;
         Grid& g = fs.msstft[s];
         g.cols = n / 2 + 1;
         g.frames = im.msstft[s].frames(length, hop);
         g.v = im.msstft[s].power(x.data(), length, hop);
+        if (n == 2048) shape_power = g.v;  // `shape` reads the same STFT in power, not dB (no second transform)
         for (auto& p : g.v) p = fast_power_db(p);
     }
 
@@ -289,7 +290,7 @@ FeatureSet FeatureExtractor::extract(const std::vector<float>& mono, std::size_t
             for (std::size_t k = 0; k < K; ++k) fs.harmt.v[f * K + k] = range_db(&pw[f * nb], im.harmt_harm[k]);
     }
 
-    fs.shape = im.shape_features(x, length);
+    fs.shape = im.shape_features(shape_power, fs.msstft[1].frames);
     return fs;
 }
 

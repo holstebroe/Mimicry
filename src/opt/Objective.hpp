@@ -40,6 +40,13 @@ public:
     [[nodiscard]] virtual std::vector<Evaluation> embed(const std::vector<std::vector<double>>& coords) {
         return evaluate(coords, true);
     }
+    // Outcomes only (failure bisection, spec 05 section 4): one render each, cached when possible, not
+    // scored and not counted as candidates.
+    [[nodiscard]] virtual std::vector<Outcome> outcomes(const std::vector<std::vector<double>>& coords) {
+        std::vector<Outcome> out;
+        for (const auto& e : evaluate(coords, false)) out.push_back(e.outcome);
+        return out;
+    }
     // Mean wall time of one candidate (render + score) so far; decides the surrogate (spec 04 section 7).
     [[nodiscard]] virtual double seconds_per_candidate() const { return 0; }
 };
@@ -59,6 +66,7 @@ public:
 
     [[nodiscard]] std::vector<Evaluation> evaluate(const std::vector<std::vector<double>>& coords, bool embed) override;
     [[nodiscard]] std::vector<Evaluation> embed(const std::vector<std::vector<double>>& coords) override;
+    [[nodiscard]] std::vector<Outcome> outcomes(const std::vector<std::vector<double>>& coords) override;
     [[nodiscard]] double seconds_per_candidate() const override;
 
     // Renders (cached) one vector; null when the render failed.
@@ -74,6 +82,10 @@ public:
     [[nodiscard]] const RenderCache& cache() const noexcept { return cache_; }
 
 private:
+    // One render per vector through the cache (no repeats), outcome and audio.
+    std::vector<std::shared_ptr<const host::Audio>> render_cached(const std::vector<std::vector<double>>& coords,
+                                                                  std::vector<Evaluation>& out);
+
     RenderBatch render_;
     host::Job job_;
     const features::Target& target_;

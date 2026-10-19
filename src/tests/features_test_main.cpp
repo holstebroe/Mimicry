@@ -89,6 +89,14 @@ void test_pitch() {
         check(std::fabs(e.f0 / f - 1.0) < 0.001, "f0 of a harmonic tone: " + std::to_string(f) + " got " + std::to_string(e.f0));
         check(e.confidence > 0.8, "f0 confidence of a clean tone");
     }
+    // A pure sine is its own fundamental, not f/7 (plan OQ11): a sub-octave comb pays for the empty harmonic
+    // slots below the tone, the tone pays nothing for the harmonics it never had.
+    for (double f : {82.41, 220.0, 440.0, 1318.5}) {
+        const auto e = estimate_f0(tone(f, 1.5, 0, 1), kRate);
+        check(std::fabs(e.f0 / f - 1.0) < 0.001, "f0 of a pure sine: " + std::to_string(f) + " got " + std::to_string(e.f0));
+        const auto noisy = estimate_f0(tone(f, 1.5, 0, 1, 50, 0.8, 0.002), kRate);
+        check(std::fabs(noisy.f0 / f - 1.0) < 0.002, "f0 of a sine in noise: " + std::to_string(f) + " got " + std::to_string(noisy.f0));
+    }
     // Odd harmonics only (square-like) must not collapse to a sub-octave comb.
     {
         Rng r(1);
@@ -297,6 +305,9 @@ void test_cache() {
     b.block_size = 256;
     check(opt::RenderCache::key(a) != opt::RenderCache::key(b), "block size is part of the key");
     b = a;
+    b.bend_range = 2;
+    check(opt::RenderCache::key(a) != opt::RenderCache::key(b), "the pitch-bend range is part of the key");
+    b = a;
     b.notes[0].cents = 3;
     check(opt::RenderCache::key(a) != opt::RenderCache::key(b), "note plan is part of the key");
     b = a;
@@ -321,7 +332,7 @@ void test_cache() {
     int fails = 0;
     auto crash = [&](const host::Job&) -> expected<host::Audio, Outcome> {
         ++fails;
-        return unexpected(Outcome::Crash);
+        return mimicry::unexpected(Outcome::Crash);
     };
     host::Job c = a;
     c.coords[0] = 0.9;
@@ -330,7 +341,7 @@ void test_cache() {
     check(fails == 1 && f1.outcome == Outcome::Crash && f2.message == "segfault", "a crash is remembered, not re-rendered");
     auto timeout = [&](const host::Job&) -> expected<host::Audio, Outcome> {
         ++fails;
-        return unexpected(Outcome::Timeout);
+        return mimicry::unexpected(Outcome::Timeout);
     };
     host::Job d = a;
     d.coords[0] = 0.5;

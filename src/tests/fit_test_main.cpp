@@ -1,7 +1,8 @@
 // Optimizer against a real plugin (WP3): the probe classifies mimicry_test_synth's parameters and finds its
 // safe box, the profile round-trips, the pipeline recovers a preset of the plugin's own (a small T6) and the
-// fingerprint database seeds from the right neighbourhood. Renders go through a worker pool, as in
-// production (CLAUDE.md rule 4). Usage: mimicry_fit_test <plugin> <mimicry_worker>.
+// fingerprint database seeds from the right neighbourhood; failure bisection finds the planted crash (T8),
+// and its failure report replays with `mimicry replay` (spec 05 section 7). Renders go through a worker pool, as in
+// production (CLAUDE.md rule 4). Usage: mimicry_fit_test <plugin> <mimicry_worker> [<mimicry>].
 
 #include <cmath>
 #include <cstdlib>
@@ -9,12 +10,21 @@
 #include <filesystem>
 #include <format>
 #include <string>
+#include <utility>
+
+#if !defined(_WIN32)
+#include <sys/wait.h>
+#endif
 
 #include "features/Loss.hpp"
+#include "features/Pitch.hpp"
 #include "host/ParamUtil.hpp"
+#include "opt/Constraints.hpp"
+#include "output/FailureReport.hpp"
 #include "opt/Fingerprint.hpp"
 #include "opt/Objective.hpp"
 #include "opt/Pipeline.hpp"
+#include "opt/PitchCalibration.hpp"
 #include "opt/Probe.hpp"
 #include "opt/Space.hpp"
 #include "supervisor/WorkerPool.hpp"
@@ -48,10 +58,6 @@ int main(int argc, char** argv) {
         std::fputs("usage: mimicry_fit_test <plugin> <mimicry_worker>\n", stderr);
         return 2;
     }
-#if defined(_WIN32)
-    std::puts("mimicry_fit_test: skipped (process isolation not implemented on Windows yet)");
-    return 0;
-#else
     supervisor::WorkerOptions wo;
     wo.worker_exe = argv[2];
     wo.min_timeout_s = 1.0;
@@ -101,6 +107,143 @@ int main(int argc, char** argv) {
     const auto* hang = entry(*prof, ts::kHazHang);
     check(hang && hang->outcomes.back() == Outcome::Timeout && hang->safe_hi == 0.75, "probe: the hang hazard is a timeout");
     check(!prof->pairs.empty(), "probe: pair interactions measured");
+    auto role = [&](ts::ParamId id) { return entry(*prof, id) ? entry(*prof, id)->role : RoleGuess{}; };
+    check(role(ts::kCutoff).role == ParamRole::Cutoff && role(ts::kCutoff).confidence > 0.9 &&
+              role(ts::kRelease).role == ParamRole::Release && role(ts::kDetune).role == ParamRole::Detune &&
+              role(ts::kLevel).role == ParamRole::Volume,
+          "probe: roles guessed and confirmed (cutoff, release, detune, volume)");
+    // Spec 05 section 6: no smoother settles at once; a 100 ms one-pole glide needs roughly half a second.
+    check(prof->settle_ms > 0 && prof->settle_ms <= 25, std::format("settle without smoothing: {:.0f} ms", prof->settle_ms));
+    {
+        host::Job sj = job;
+        for (const auto& q : params) sj.coords.push_back(q.default_coord);
+        sj.coords[ts::kSmoothing] = info.format == host::PluginFormat::Clap ? host::plain_to_coord(params[ts::kSmoothing], 100.0)
+                                                                            : 100.0 / 2000.0;
+        const auto st = measure_settle(render, sj, params, *prof);
+        std::printf("settle with a 100 ms smoother: %.0f ms %s\n", st.settle_ms, st.note.c_str());
+        check(st.settle_ms >= 400 && st.settle_ms <= 1600, std::format("settle with a 100 ms smoother: {:.0f} ms", st.settle_ms));
+    }
+    check(prof->pitch.method == PitchMethod::Tuning && std::abs(prof->pitch.tuning_cents - 50) < 3,
+          std::format("probe: the plugin takes tuning ({} {:.1f} cents)", to_string(prof->pitch.method), prof->pitch.tuning_cents));
+    {
+        // Spec 02 section 5: with tuning ignored, a full MIDI pitch bend measures the bend range (set to 7).
+        host::Job cj = job;
+        for (const auto& q : params) cj.coords.push_back(q.default_coord);
+        cj.coords[ts::kIgnoreTuning] = 1.0;
+        cj.coords[ts::kBendRange] = info.format == host::PluginFormat::Clap ? host::plain_to_coord(params[ts::kBendRange], 7.0)
+                                                                            : (7.0 - 1.0) / 23.0;
+        const auto bc = calibrate_pitch(render, cj);
+        check(bc.method == PitchMethod::Bend && std::abs(bc.bend_range - 7.0) < 0.1,
+              std::format("pitch: bend measured when tuning is ignored ({} range {:.3f}, tuning {:.1f} cents)",
+                          to_string(bc.method), bc.bend_range, bc.tuning_cents));
+        // The bend plays the cents: 30 cents through a 7-semitone bend lands within 3 cents.
+        auto played = cj;
+        played.notes[0].cents = 30;
+        apply_pitch_method(bc, played);
+        const auto r = render({cj, played});
+        if (r.size() == 2 && r[0] && r[1]) {
+            const double f0 = features::estimate_f0(mono_of(*r[0]), job.sample_rate).f0;
+            const double res = pitch_residual_cents(*r[1], f0 * std::pow(2.0, 30.0 / 1200.0));
+            check(std::abs(res) < 3, std::format("pitch: 30 cents through the bend, residual {:+.2f} cents", res));
+        } else {
+            check(false, "pitch: bend renders");
+        }
+    }
+    for (auto id : {ts::kHazNan, ts::kHazHang, ts::kHazPoison, ts::kHazSticky, ts::kHazThrow}) {
+        const auto* e = entry(*prof, id);
+        check(e && e->dead() && e->outcomes.back() != Outcome::Ok && e->safe_hi == 0.75,
+              "probe: a hazard switch that only fails is dead, its failure kept: " + (e ? e->name : std::to_string(id)));
+    }
+
+    // --- T8: bisection finds the planted crash {Hazard A > 0.8, Hazard B > 0.9} within 2 % (spec 05 section 4) ---
+    {
+        std::vector<double> good;
+        for (const auto& q : params) good.push_back(q.default_coord);
+        auto bad = good;
+        bad[ts::kHazA] = 0.95;
+        bad[ts::kHazB] = 0.97;
+        bad[ts::kWave] = 1.0;  // harmless changes ddmin must drop
+        bad[ts::kCutoff] = 0.3;
+        bad[ts::kSustain] = 0.4;
+        bad[ts::kDecay] = 0.6;
+        OutcomeBatch test = [&](const std::vector<std::vector<double>>& vs) {
+            std::vector<host::Job> jobs;
+            for (const auto& v : vs) {
+                host::Job j = job;
+                j.coords = v;
+                jobs.push_back(std::move(j));
+            }
+            std::vector<Outcome> out;
+            for (const auto& r : render(jobs)) out.push_back(r ? Outcome::Ok : r.error());
+            return out;
+        };
+        const auto r = bisect_failure(test, good, bad, Outcome::Crash);
+        std::string found;
+        for (std::size_t k = 0; k < r.minimal.size(); ++k)
+            found += std::format(" {}={:.4f}", params[r.minimal[k]].name, k < r.threshold.size() ? r.threshold[k] : -1.0);
+        std::printf("T8: reproduced %d, minimal set:%s (%ld renders)\n", int(r.reproduced), found.c_str(), r.renders);
+        const bool pair = r.minimal.size() == 2 && r.minimal[0] == ts::kHazA && r.minimal[1] == ts::kHazB;
+        check(r.reproduced && pair, "T8: minimal failing set is {Hazard A, Hazard B}");
+        check(pair && std::abs(r.threshold[0] - 0.8) < 0.02 && std::abs(r.threshold[1] - 0.9) < 0.02, "T8: thresholds within 2 %");
+        if (pair) {
+            ConstraintSet set(params);
+            set.add(make_constraint(r, bad, Outcome::Crash, params));
+            auto in = good, out = good;
+            in[ts::kHazA] = 0.85, in[ts::kHazB] = 0.93;
+            out[ts::kHazA] = 0.85, out[ts::kHazB] = 0.85;
+            check(set.find(in) && !set.find(out), "T8: the stored region rejects the crash corner only");
+        }
+
+        // Spec 05 section 7: the failure report round-trips and replays.
+        const auto rdir = std::filesystem::temp_directory_path() / ("mimicry_crashes_" + std::string(host::to_string(info.format)));
+        std::filesystem::remove_all(rdir);
+        output::FailureReport fr;
+        fr.info = info;
+        fr.plugin_path = std::filesystem::absolute(argv[1]).string();
+        fr.job = job;
+        fr.job.coords = bad;
+        fr.outcome = Outcome::Crash;
+        fr.set_params(params);
+        for (std::size_t k = 0; k < r.minimal.size(); ++k)
+            fr.minimal.push_back({params[r.minimal[k]].id, params[r.minimal[k]].name, r.threshold[k]});
+        auto nan_report = fr;
+        nan_report.job.coords = good;
+        nan_report.job.coords[ts::kHazNan] = 1.0;
+        nan_report.outcome = Outcome::NonFinite;
+        nan_report.minimal.clear();
+        nan_report.set_params(params);
+        const auto crash_path = fr.write(rdir);
+        const auto nan_path = nan_report.write(rdir);
+        check(crash_path && nan_path && *crash_path != *nan_path, "failure reports written, distinct files");
+        if (crash_path && nan_path) {
+            auto back = output::FailureReport::load(*crash_path);
+            check(back && back->outcome == Outcome::Crash && back->minimal.size() == r.minimal.size() &&
+                      back->coords_for(params) == bad && back->job.notes.size() == job.notes.size() && back->hash() == fr.hash(),
+                  "failure report round trip");
+            auto shuffled = params;  // matched on id + name, not position (rule 7)
+            std::swap(shuffled[ts::kHazA], shuffled[ts::kHazB]);
+            const auto moved = back ? back->coords_for(shuffled) : std::vector<double>{};
+            check(moved.size() == params.size() && moved[ts::kHazA] == bad[ts::kHazB] && moved[ts::kHazB] == bad[ts::kHazA],
+                  "failure report values follow ids and names");
+            if (argc > 3) {
+                auto run = [&](const std::string& extra, const std::filesystem::path& file) {
+#if defined(_WIN32)
+                    // cmd.exe strips the outer quotes of a line that starts with one.
+                    const std::string cmd = std::format("\"\"{}\" replay \"{}\" {} > NUL 2>&1\"", argv[3], file.string(), extra);
+                    return std::system(cmd.c_str());
+#else
+                    const std::string cmd = std::format("\"{}\" replay \"{}\" {} > /dev/null 2>&1", argv[3], file.string(), extra);
+                    const int st = std::system(cmd.c_str());
+                    return WIFEXITED(st) ? WEXITSTATUS(st) : -1;
+#endif
+                };
+                check(run("--isolated", *crash_path) == 0, "replay --isolated reproduces the crash");
+                check(run("", *nan_path) == 0, "replay in-process reproduces the NaN");
+                check(run("--isolated", *nan_path) == 0, "replay --isolated reproduces the NaN");
+            }
+        }
+        std::filesystem::remove_all(rdir);
+    }
 
     const auto dir = std::filesystem::temp_directory_path() / ("mimicry_fit_test_" + std::string(host::to_string(info.format)));
     std::filesystem::create_directories(dir);
@@ -155,24 +298,47 @@ int main(int argc, char** argv) {
     check(space.level_index() == long(ts::kLevel), "the level parameter is found");
     AudioObjective obj(render, job, *target, features::Weights::preset(target->analysis().kind), so, 3);
     check(obj.calibrate_offset(space.defaults()), "onset offset from the defaults");
+    {
+        // Identical vectors in one batch render once and share the outcome.
+        std::size_t rendered = 0;
+        RenderBatch counting = [&](const std::vector<host::Job>& jobs) {
+            rendered += jobs.size();
+            return render(jobs);
+        };
+        AudioObjective dup(counting, job, *target, features::Weights::preset(target->analysis().kind), so, 1);
+        const auto ev = dup.evaluate({truth, truth, space.defaults(), truth}, false);
+        check(rendered == 2 && ev.size() == 4 && ev[0].ok() && ev[1].ok() && ev[3].ok() && ev[0].loss == ev[3].loss,
+              "a batch renders each distinct vector once (" + std::to_string(rendered) + " renders)");
+    }
 
     PipelineOptions opt;
     opt.max_evals = 4000;
     opt.time_cap_s = 240;
     opt.seed_samples = 150;
-    opt.restarts = 2;
-    opt.seed = 3;
+    opt.restarts = std::getenv("FIT_R") ? std::atoi(std::getenv("FIT_R")) : 2;
+    opt.seed = std::getenv("FIT_SEED") ? std::uint64_t(std::atoll(std::getenv("FIT_SEED"))) : 3;
     opt.log = [](const std::string& s) { std::printf("  %s\n", s.c_str()); };
     const auto res = run_pipeline(obj, space, opt);
     std::printf("fit: loss %.3f dB after %ld evals in %.1f s (cache hits %zu); cutoff %.3f (truth %.3f), sustain %.3f "
                 "(truth %.3f), wave %.0f\n", res.best.eval.loss, res.evals, res.seconds, obj.cache().hits(),
                 res.best.coords[ts::kCutoff], truth[ts::kCutoff], res.best.coords[ts::kSustain], truth[ts::kSustain],
                 res.best.coords[ts::kWave]);
+    for (auto i : space.active())
+        std::printf("  %-12s found %.3f (%s)  truth %.3f (%s)\n", params[i].name.c_str(), res.best.coords[i],
+                    p0.value_text(params[i].id, res.best.coords[i]).c_str(), truth[i], p0.value_text(params[i].id, truth[i]).c_str());
+    for (const auto& st : res.stages)
+        std::printf("  stage %-22s %2d free %8.3f -> %8.3f dB %6ld evals %5.1f s\n", st.name.c_str(), st.free, st.before, st.after,
+                    st.evals, st.seconds);
     auto played = truth;  // the true preset with its pitch moved from the detune parameter to the note
     played[ts::kDetune] = space.defaults()[ts::kDetune];
     const auto self = obj.evaluate({played}, false);
     std::printf("  loss of the true preset played at the measured pitch: %.3f dB\n", self[0].loss);
     check(res.best.eval.ok() && res.best.eval.loss < 1.0, "fit recovers the preset (loss under 1 dB)");
+    if (auto best = obj.render(res.best.coords)) {
+        const double residual = pitch_residual_cents(*best, an.f0);
+        std::printf("  pitch residual of the match: %+.2f cents\n", residual);
+        check(std::abs(residual) < 3, "fit: the match's pitch is within 3 cents of the target");
+    }
     check(res.best.coords[ts::kWave] == 1.0, "fit: wave (categorical) recovered");
     const double cutoff_hz = std::atof(p0.value_text(ts::kCutoff, res.best.coords[ts::kCutoff]).c_str());
     std::printf("  cutoff found: %.0f Hz (truth 1500 Hz)\n", cutoff_hz);
@@ -215,5 +381,4 @@ int main(int argc, char** argv) {
     }
     std::puts("mimicry_fit_test: all passed");
     return 0;
-#endif
 }

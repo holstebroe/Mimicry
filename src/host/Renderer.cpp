@@ -1,6 +1,7 @@
 #include "host/Renderer.hpp"
 
 #include <algorithm>
+#include <atomic>
 #include <cmath>
 #include <exception>
 #include <format>
@@ -95,10 +96,39 @@ expected<void, HostError> Renderer::initialise(int sample_rate, int block_size) 
         return s;
     }
     started_ = true;
+    if (!have_clean_) {
+        // The clean snapshot of spec 05 section 5; a plugin without state support has nothing to reload.
+        have_clean_ = true;
+        try {
+            if (auto st = engine_->save_state()) clean_ = std::move(*st);
+        } catch (...) {
+        }
+    }
     return {};
 }
 
-std::string Renderer::value_text(std::uint32_t id, double coord) const { return engine_->value_text(id, coord); }
+std::string Renderer::value_text(std::uint32_t id, double coord) const {
+    try {
+        return engine_->value_text(id, coord);
+    } catch (...) {
+        return {};  // spec 05 section 9: a plugin exception never crosses into the host
+    }
+}
+
+void Renderer::recover() {
+    if (!restart_engine()) return;
+    if (!clean_.empty()) (void)load_state(clean_);
+}
+
+expected<void, HostError> Renderer::handle_restart_request() {
+    try {
+        engine_->pump_main_thread();
+    } catch (...) {
+    }
+    if (!engine_->take_restart_request()) return {};
+    if (engine_->rescan_parameters()) ++version_;
+    return restart_engine();
+}
 
 void Renderer::pump() {
     pump_.pump();
@@ -143,6 +173,19 @@ Outcome Renderer::fail(Outcome outcome, std::string message) {
 }
 
 expected<Audio, Outcome> Renderer::render(const Job& job) {
+    auto r = render_once(job);
+    if (!r) {
+        const std::string why = message_;
+        recover();
+        message_ = why;
+    }
+    // Restart requests are not failures: re-enumerate, bump the version (spec 05 section 9). Checked
+    // after failed renders too, so a table change is never missed.
+    if (auto h = handle_restart_request(); !h && r) return unexpected(fail(Outcome::HostError, h.error().message));
+    return r;
+}
+
+expected<Audio, Outcome> Renderer::render_once(const Job& job) {
     message_.clear();
     const auto& params = engine_->parameters();
     if (job.coords.size() != params.size())
@@ -157,12 +200,12 @@ expected<Audio, Outcome> Renderer::render(const Job& job) {
         if (auto r = restart_engine(); !r) return unexpected(fail(Outcome::HostError, r.error().message));
     }
 
-    // The full vector. Read-only parameters are not sent; bypass and program change are pinned to their
-    // default; program change goes first so it cannot overwrite the values that follow.
+    // The full vector. Read-only and program-change parameters are never sent: sending even its default IS a
+    // program change (a wrapper turns it into a MIDI program change that may land after the values and
+    // overwrite them), so a program parameter is pinned by leaving it alone (spec 05 section 9). Bypass is
+    // pinned to its default.
     std::vector<ParamValue> values;
     values.reserve(params.size());
-    for (std::size_t i = 0; i < params.size(); ++i)
-        if (params[i].flags.program_change) values.push_back({params[i].id, params[i].default_coord});
     for (std::size_t i = 0; i < params.size(); ++i) {
         const ParamDesc& p = params[i];
         if (p.flags.readonly || p.flags.program_change) continue;
@@ -184,10 +227,16 @@ expected<Audio, Outcome> Renderer::render(const Job& job) {
     double plan_end_ms = 0;
     for (const Note& n : job.notes) {
         const std::int32_t id = next_id++;
-        events.push_back({static_cast<std::uint32_t>(std::max(frames_for(n.on_ms, rate), 0)), true, n.key, n.cents,
-                          n.velocity, id});
+        NoteEvent on{static_cast<std::uint32_t>(std::max(frames_for(n.on_ms, rate), 0)), true, n.key, n.cents, n.velocity, id};
+        if (job.bend_range > 0) {  // cents as pitch bend (spec 02 section 5)
+            on.set_bend = true;
+            on.bend = std::clamp(n.cents / (100.0 * job.bend_range), -1.0, 1.0);
+            on.cents = 0;
+        }
+        events.push_back(on);
+        // The off carries the on's cents: a backend that rounds cents to a key must release the same key.
         events.push_back({static_cast<std::uint32_t>(std::max(frames_for(std::max(n.off_ms, n.on_ms), rate), 0)),
-                          false, n.key, 0.0, 0.0f, id});
+                          false, n.key, on.cents, 0.0f, id});
         plan_end_ms = std::max(plan_end_ms, std::max(n.off_ms, n.on_ms));
     }
     // Note-off before note-on at the same frame would release a note that has not started: keep the
@@ -197,7 +246,9 @@ expected<Audio, Outcome> Renderer::render(const Job& job) {
 
     const std::int64_t plan_end = frames_for(plan_end_ms, rate);
     const std::int64_t tail_max = std::max(frames_for(job.tail_max_ms, rate), 0);
-    const std::int64_t hard_end = plan_end + tail_max;
+    // At least one frame past the last event, so an event at plan_end is delivered even without a tail.
+    const std::int64_t last_event = events.empty() ? 0 : static_cast<std::int64_t>(events.back().frame) + 1;
+    const std::int64_t hard_end = std::max(plan_end + tail_max, last_event);
     const int quiet_needed = frames_for(kQuietSeconds * 1000.0, rate);
     const double quiet_linear = std::pow(10.0, kQuietDb / 20.0);
 
@@ -218,6 +269,7 @@ expected<Audio, Outcome> Renderer::render(const Job& job) {
     const auto run_block = [&](int frames, std::span<const ParamValue> pv, std::span<const NoteEvent> ev,
                                bool record) -> bool {
         expected<void, HostError> r;
+        if (blocks_) std::atomic_ref<std::uint64_t>(*blocks_).fetch_add(1, std::memory_order_relaxed);
         thread_.run([&] {
             r = guarded("process", [&] {
                 return engine_->process(Block{frames, pv, ev}, left.data(), right.data());
@@ -298,12 +350,6 @@ expected<Audio, Outcome> Renderer::render(const Job& job) {
     }
     if (!job.allow_silent && peak < std::pow(10.0, kSilenceDb / 20.0))
         return unexpected(fail(Outcome::Silent, "output below -90 dBFS"));
-
-    // Restart requests are not failures: re-enumerate, bump the version (spec 05 section 9).
-    if (engine_->take_restart_request()) {
-        if (engine_->rescan_parameters()) ++version_;
-        if (auto r = restart_engine(); !r) return unexpected(fail(Outcome::HostError, r.error().message));
-    }
     return out;
 }
 

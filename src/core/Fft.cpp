@@ -27,30 +27,50 @@ Fft::Fft(std::size_t size) : n_(size) {
     }
 }
 
-void Fft::transform(std::vector<std::complex<double>>& d, bool inverse) const {
-    if (d.size() != n_) throw std::invalid_argument("Fft: wrong buffer size");
+void Fft::transform(std::vector<std::complex<double>>& data, bool inverse) const {
+    if (data.size() != n_) throw std::invalid_argument("Fft: wrong buffer size");
     for (std::size_t i = 0; i < n_; ++i)
-        if (i < rev_[i]) std::swap(d[i], d[rev_[i]]);
-    // Plain real arithmetic: std::complex multiplication goes through a NaN-checking libcall without
-    // -fcx-limited-range, which made this loop several times slower.
+        if (i < rev_[i]) std::swap(data[i], data[rev_[i]]);
+    // Plain real arithmetic on the interleaved (re, im) array: std::complex multiplication goes through a
+    // NaN-checking libcall without -fcx-limited-range, which made this loop several times slower.
+    double* d = reinterpret_cast<double*>(data.data());
     const double sign = inverse ? -1.0 : 1.0;
-    for (std::size_t len = 2; len <= n_; len <<= 1) {
+    // Stages 1 and 2 have trivial twiddles (1, and -i / +i): no multiplications.
+    for (std::size_t i = 0; i < 2 * n_; i += 4) {
+        const double ar = d[i], ai = d[i + 1], br = d[i + 2], bi = d[i + 3];
+        d[i] = ar + br, d[i + 1] = ai + bi, d[i + 2] = ar - br, d[i + 3] = ai - bi;
+    }
+    if (n_ >= 4) {
+        for (std::size_t i = 0; i < 2 * n_; i += 8) {
+            // j = 0: w = 1
+            double ur = d[i], ui = d[i + 1], vr = d[i + 4], vi = d[i + 5];
+            d[i] = ur + vr, d[i + 1] = ui + vi, d[i + 4] = ur - vr, d[i + 5] = ui - vi;
+            // j = 1: w = -i (forward) or +i (inverse): v = x * w
+            const double xr = d[i + 6], xi = d[i + 7];
+            vr = sign * xi, vi = -sign * xr;
+            ur = d[i + 2], ui = d[i + 3];
+            d[i + 2] = ur + vr, d[i + 3] = ui + vi, d[i + 6] = ur - vr, d[i + 7] = ui - vi;
+        }
+    }
+    for (std::size_t len = 8; len <= n_; len <<= 1) {
         const std::size_t half = len / 2;
-        const std::complex<double>* tw = &stage_tw_[half - 1];
+        const double* tw = reinterpret_cast<const double*>(&stage_tw_[half - 1]);
         for (std::size_t i = 0; i < n_; i += len) {
+            double* a = d + 2 * i;
+            double* b = d + 2 * (i + half);
             for (std::size_t j = 0; j < half; ++j) {
-                const double wr = tw[j].real(), wi = sign * tw[j].imag();
-                const double xr = d[i + j + half].real(), xi = d[i + j + half].imag();
+                const double wr = tw[2 * j], wi = sign * tw[2 * j + 1];
+                const double xr = b[2 * j], xi = b[2 * j + 1];
                 const double vr = xr * wr - xi * wi, vi = xr * wi + xi * wr;
-                const double ur = d[i + j].real(), ui = d[i + j].imag();
-                d[i + j] = {ur + vr, ui + vi};
-                d[i + j + half] = {ur - vr, ui - vi};
+                const double ur = a[2 * j], ui = a[2 * j + 1];
+                a[2 * j] = ur + vr, a[2 * j + 1] = ui + vi;
+                b[2 * j] = ur - vr, b[2 * j + 1] = ui - vi;
             }
         }
     }
     if (inverse) {
         const double s = 1.0 / static_cast<double>(n_);
-        for (auto& x : d) x *= s;
+        for (std::size_t i = 0; i < 2 * n_; ++i) d[i] *= s;
     }
 }
 

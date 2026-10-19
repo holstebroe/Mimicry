@@ -33,6 +33,17 @@ struct ProbeOptions {
     std::function<void(const std::string&)> log;
 };
 
+// Settle time (spec 05 section 6): every continuous parameter the probe found alive (pitch excepted) steps to
+// its far quarter point inside the safe box, and the job is rendered with settle times from 5 ms to 3.2 s.
+// The settle time is the shortest whose audio matches the 3.2 s render: within 1 % RMS for a deterministic
+// plugin, within twice the embedding floor otherwise [D]. 0 when it cannot be measured (`note` says why).
+struct SettleResult {
+    double settle_ms = 0;
+    std::string note;
+};
+[[nodiscard]] SettleResult measure_settle(const RenderBatch& render, host::Job base,
+                                          const std::vector<host::ParamDesc>& params, const Profile& profile);
+
 [[nodiscard]] expected<Profile, std::string> probe(const RenderBatch& render, const host::PluginInfo& info,
                                                    const std::vector<host::ParamDesc>& params, const ProbeOptions& options);
 

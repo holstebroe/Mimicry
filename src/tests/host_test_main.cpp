@@ -1,13 +1,15 @@
-// Host tests against mimicry_test_synth (in-process, for debugging the backend; T1-T3, T9 and parts of
-// T13/T16 of docs/spec/07_OUTPUT_VALIDATION.md). Usage: mimicry_host_test <plugin.clap|plugin.vst3>.
+// Host tests against mimicry_test_synth (in-process, for debugging the backend; T1-T3, T9, T13 and T16 of
+// docs/spec/07_OUTPUT_VALIDATION.md: restart handling, program-change pinning, offline mode, tuning cents). Usage: mimicry_host_test <plugin.clap|plugin.vst3>.
 
 #include <algorithm>
 #include <cmath>
 #include <complex>
 #include <cstdio>
+#include <limits>
 #include <string>
 
 #include "core/Fft.hpp"
+#include "host/Codec.hpp"
 #include "host/PluginHost.hpp"
 #include "tests/test_synth/TestSynthCore.hpp"
 
@@ -71,6 +73,15 @@ double dominant_hz(const Audio& a, double from_s, double to_s) {
     return static_cast<double>(peak) * a.sample_rate / static_cast<double>(n);
 }
 
+// The parameters the test synth defines: drops a program-change parameter only one format has (clap-wrapper's
+// MIDI program change in the VST3 build), which hosts pin and never send.
+std::vector<ParamDesc> own_parameters(const Instance& inst) {
+    std::vector<ParamDesc> out;
+    for (const auto& p : inst.parameters())
+        if (!(p.flags.program_change && p.id >= ts::kParamCount)) out.push_back(p);
+    return out;
+}
+
 void test_enumeration(Instance& inst) {
     const auto& info = inst.info();
     const bool clap = info.format == PluginFormat::Clap;
@@ -78,7 +89,8 @@ void test_enumeration(Instance& inst) {
     check(info.kind == PluginKind::Instrument, "kind is Instrument");
     check(!info.version_hash.empty() && info.version_hash != "unknown", "version hash is set");
 
-    const auto& ps = inst.parameters();
+    // The synth's own parameters; a VST3 wrapper may add a MIDI program-change parameter (pinned, never sent).
+    const auto ps = own_parameters(inst);
     check(ps.size() == ts::kParamCount, "parameter count " + std::to_string(ps.size()));
     if (ps.size() != ts::kParamCount) return;
     for (std::uint32_t i = 0; i < ts::kParamCount; ++i) {
@@ -123,6 +135,19 @@ void test_rendering(Instance& inst) {
     const double f = dominant_hz(*a, 0.15, 0.55);
     check(std::fabs(f - 261.63) < 3.0, "C4 is 261.6 Hz: " + std::to_string(f));
     check(frames < 48000 * 3, "tail detection ends the render early");
+
+    // Without a tail the render still runs one frame past the last event, so the note-off is delivered.
+    auto no_tail = make_job(inst, 0, 500);
+    no_tail.tail_max_ms = 0;
+    auto c = inst.render(no_tail);
+    check(c && c->samples.size() / 2 == 24001, "tail 0: the note-off at the plan end is delivered");
+
+    // A non-finite coordinate survives the worker codec as NaN, which renders at the default (as in-process).
+    auto odd = make_job(inst);
+    odd.coords[index_of(inst, ts::kCutoff)] = std::numeric_limits<double>::infinity();
+    auto wire = json::parse(to_json(odd).dump());
+    auto decoded = wire ? job_from_json(*wire) : unexpected(std::string("parse"));
+    check(decoded && std::isnan(decoded->coords[index_of(inst, ts::kCutoff)]), "codec: a non-finite coordinate reads back as NaN");
 
     // +100 cents is one semitone up (note expression / tuning).
     auto up = make_job(inst, 0, 500, 60, 100.0);
@@ -183,6 +208,15 @@ void test_pinning(Instance& inst) {
     check(a && ref && a->samples == ref->samples, "pinned parameters do not change the sound");
 }
 
+// T16: the host renders in offline mode (VST3 kOffline, which clap-wrapper passes on as CLAP_RENDER_OFFLINE;
+// CLAP through the render extension). The synth's Require Offline switch outputs NaN otherwise.
+void test_offline(Instance& inst) {
+    auto job = make_job(inst);
+    job.coords[index_of(inst, ts::kRequireOffline)] = 1.0;
+    auto r = inst.render(job);
+    check(r.has_value(), "T16: offline render mode is set (" + std::string(r ? "Ok" : to_string(r.error())) + ")");
+}
+
 void test_restart_and_state(Instance& inst, const std::string& path) {
     auto job = make_job(inst);
     set_plain(inst, job.coords, ts::kRestart, 1.0);
@@ -206,8 +240,8 @@ void test_restart_and_state(Instance& inst, const std::string& path) {
 
 // T13: the same synth as CLAP and as VST3 gives the same parameters and (nearly) the same audio.
 void test_equivalence(Instance& a, Instance& b) {
-    const auto& pa = a.parameters();
-    const auto& pb = b.parameters();
+    const auto pa = own_parameters(a);
+    const auto pb = own_parameters(b);
     check(pa.size() == pb.size(), "same parameter count in both formats");
     if (pa.size() != pb.size()) return;
     for (std::size_t i = 0; i < pa.size(); ++i) {
@@ -256,6 +290,7 @@ int main(int argc, char** argv) {
     test_repeatability(**inst);
     test_failures(**inst);
     test_pinning(**inst);
+    test_offline(**inst);
     test_restart_and_state(**inst, path);
 
     if (argc >= 3) {

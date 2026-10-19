@@ -8,8 +8,10 @@
 #include <cstring>
 #include <format>
 #include <mutex>
+#include <optional>
 #include <thread>
 #include <unordered_map>
+#include <unordered_set>
 
 #include "base/source/fstring.h"
 #include "pluginterfaces/base/funknown.h"
@@ -17,6 +19,7 @@
 #include "pluginterfaces/vst/ivstcomponent.h"
 #include "pluginterfaces/vst/ivsteditcontroller.h"
 #include "pluginterfaces/vst/ivstevents.h"
+#include "pluginterfaces/vst/ivstmidicontrollers.h"
 #include "pluginterfaces/vst/ivstprocesscontext.h"
 #include "pluginterfaces/vst/ivstunits.h"
 #include "public.sdk/source/common/memorystream.h"
@@ -99,6 +102,9 @@ public:
     ~Vst3Engine() override {
         if (controller_) controller_->setComponentHandler(nullptr);
         data_.unprepare();
+        // Every interface pointer goes before the module: one released after FreeLibrary calls into unloaded
+        // code (Linux keeps a dlclose'd library mapped, so only Windows crashed).
+        unit_info_ = nullptr;
         controller_ = nullptr;
         processor_ = nullptr;
         component_ = nullptr;
@@ -135,6 +141,20 @@ public:
         if (!processor_) return unexpected(HostError{"the component is not an audio processor"});
         if (controller_) controller_->setComponentHandler(&handler_);
         unit_info_ = controller_ ? FUnknownPtr<IUnitInfo>(controller_) : nullptr;
+        // MIDI pitch bend goes in as the parameter the controller maps it to (spec 02 section 5). A parameter the
+        // controller maps a MIDI controller to AND that is not automatable is a MIDI input proxy (clap-wrapper,
+        // JUCE), not plugin state: it is left out of the parameter table, so a full vector never sends "CC 7 = 0"
+        // and the table matches the CLAP build's. A real, automatable parameter a CC drives stays in.
+        if (controller_) {
+            FUnknownPtr<IMidiMapping> mapping(controller_);
+            if (mapping) {
+                ParamID id = 0;
+                if (mapping->getMidiControllerAssignment(0, 0, ControllerNumbers::kPitchBend, id) == kResultTrue) bend_param_ = id;
+                for (int16 ch = 0; ch < 16; ++ch)
+                    for (int32 cc = 0; cc < kCountCtrlNumber; ++cc)
+                        if (mapping->getMidiControllerAssignment(0, ch, CtrlNumber(cc), id) == kResultTrue) midi_params_.insert(id);
+            }
+        }
 
         info_.format = PluginFormat::Vst3;
         info_.uid = chosen->ID().toString();
@@ -268,7 +288,8 @@ public:
     }
 
     expected<void, HostError> start() override {
-        if (processor_->setProcessing(true) != kResultOk && processor_->setProcessing(true) != kNotImplemented)
+        const tresult r = processor_->setProcessing(true);  // once: a second call would unbalance the plugin
+        if (r != kResultOk && r != kNotImplemented)
             return unexpected(HostError{"setProcessing(true) failed"});
         return {};
     }
@@ -287,7 +308,16 @@ public:
             if (auto* q = changes_.addParameterData(pv.id, index)) q->addPoint(0, std::clamp(pv.coord, 0.0, 1.0), index);
         }
         events_.clear();
+        if (block.notes.size() > static_cast<std::size_t>(events_capacity_)) {  // grow like the CLAP backend
+            events_capacity_ = static_cast<int32>(std::max<std::size_t>(block.notes.size(), 2 * static_cast<std::size_t>(events_capacity_)));
+            events_.setMaxSize(events_capacity_);
+        }
         for (const NoteEvent& n : block.notes) {
+            if (n.set_bend && bend_param_) {  // normalised bend: 0.5 is centre
+                int32 index = 0;
+                if (auto* q = changes_.addParameterData(*bend_param_, index))
+                    q->addPoint(static_cast<int32>(n.frame), std::clamp(0.5 + 0.5 * n.bend, 0.0, 1.0), index);
+            }
             Event e{};
             e.busIndex = 0;
             e.sampleOffset = static_cast<int32>(n.frame);
@@ -309,7 +339,7 @@ public:
                 e.noteOff.noteId = n.note_id;
                 e.noteOff.tuning = 0;
             }
-            events_.addEvent(e);
+            if (events_.addEvent(e) != kResultOk) return unexpected(HostError{"note event list full"});
         }
 
         ProcessContext ctx{};
@@ -384,6 +414,9 @@ private:
         for (int32 i = 0; i < n; ++i) {
             ParameterInfo pi{};
             if (controller_->getParameterInfo(i, pi) != kResultOk) continue;
+            // MIDI input proxy (see open). IMidiMapping cannot be asked for program change (kCtrlProgramChange is
+            // outside kCountCtrlNumber): a wrapper's program-change parameter stays, pinned and never sent.
+            if (midi_params_.count(pi.id) && !(pi.flags & ParameterInfo::kCanAutomate)) continue;
             ParamDesc d;
             d.id = pi.id;
             d.name = utf8(pi.title);
@@ -417,6 +450,8 @@ private:
     IPtr<IEditController> controller_;
     FUnknownPtr<IAudioProcessor> processor_;
     FUnknownPtr<IUnitInfo> unit_info_;
+    std::optional<ParamID> bend_param_;  // IMidiMapping of kPitchBend, if the controller offers one
+    std::unordered_set<ParamID> midi_params_;  // every IMidiMapping target
 
     PluginInfo info_;
     std::vector<ParamDesc> params_list_;
@@ -424,7 +459,8 @@ private:
 
     HostProcessData data_;
     ParameterChanges changes_, out_changes_;
-    EventList events_{64};
+    int32 events_capacity_ = 64;
+    EventList events_{events_capacity_};
     int rate_ = 48000, max_block_ = 512, out_channels_ = 2;
     std::int64_t position_ = 0;
     bool active_ = false;

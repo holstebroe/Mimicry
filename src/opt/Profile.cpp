@@ -38,6 +38,56 @@ ParamGroup group_of(ProbeClass c) noexcept {
     return ParamGroup::Unknown;
 }
 
+RoleGuess confirm_role(RoleGuess guess, ProbeClass measured) noexcept {
+    if (guess.role == ParamRole::None || measured == ProbeClass::Dead) return guess;
+    using C = ProbeClass;
+    auto fits = [&](std::initializer_list<C> ok) {
+        for (auto c : ok)
+            if (c == measured) return true;
+        return false;
+    };
+    bool ok = false;
+    switch (guess.role) {
+        case ParamRole::Cutoff:
+        case ParamRole::FilterEnvAmount:
+        case ParamRole::FilterKeyTrack:
+        case ParamRole::EqFreq:  // a lowpass on a pure tone changes its level rather than its brightness
+            ok = fits({C::Brightness, C::Level, C::Spectrum});
+            break;
+        case ParamRole::Resonance:
+        case ParamRole::FilterType:
+        case ParamRole::Drive:
+        case ParamRole::OscWave:
+        case ParamRole::EqQ: ok = fits({C::Brightness, C::Spectrum, C::Level}); break;
+        case ParamRole::Attack:
+        case ParamRole::Decay:
+        case ParamRole::Sustain:
+        case ParamRole::Release: ok = fits({C::Time, C::Level}); break;  // a long attack or a low sustain lowers the level
+        case ParamRole::Detune:
+        case ParamRole::CoarseTune:
+        case ParamRole::FineTune: ok = fits({C::Pitch, C::Spectrum}); break;
+        case ParamRole::Unison: ok = fits({C::Spectrum, C::Brightness, C::Level, C::Pitch}); break;
+        case ParamRole::LfoRate:
+        case ParamRole::LfoDepth: ok = fits({C::Pitch, C::Spectrum, C::Level, C::Brightness}); break;
+        case ParamRole::OscLevel:
+        case ParamRole::NoiseLevel:
+        case ParamRole::Volume:
+        case ParamRole::Makeup:
+        case ParamRole::EqGain:
+        case ParamRole::Pan: ok = fits({C::Level, C::Spectrum, C::Brightness}); break;
+        case ParamRole::Threshold:
+        case ParamRole::Ratio: ok = fits({C::Level, C::Spectrum, C::Time}); break;
+        case ParamRole::Mix:
+        case ParamRole::Feedback:
+        case ParamRole::Time:
+        case ParamRole::Size:
+        case ParamRole::Damping: ok = fits({C::Fx, C::Time, C::Spectrum, C::Level, C::Brightness}); break;
+        case ParamRole::None: break;
+    }
+    guess.confidence = ok ? std::min(1.0, guess.confidence * 1.25) : guess.confidence * 0.4;
+    return guess;
+}
+
 namespace {
 
 std::string_view response_name(Response r) {
@@ -46,12 +96,6 @@ std::string_view response_name(Response r) {
 
 Response parse_response(std::string_view s) {
     return s == "log" ? Response::Log : s == "exp" ? Response::Exp : Response::Linear;
-}
-
-Outcome parse_outcome(std::string_view s) {
-    for (int o = 0; o <= int(Outcome::Crash); ++o)
-        if (to_string(Outcome(o)) == s) return Outcome(o);
-    return Outcome::HostError;
 }
 
 }  // namespace
@@ -82,6 +126,7 @@ json::Value Profile::to_json() const {
     v.set("floor_db", floor_db);
     v.set("embedding_floor", embedding_floor);
     v.set("render_ms", render_ms);
+    v.set("settle_ms", settle_ms);
     json::Array ps;
     for (const auto& p : params) {
         json::Value e;
@@ -90,6 +135,8 @@ json::Value Profile::to_json() const {
         e.set("group", std::string(to_string(p.names.group)));
         e.set("confidence", p.names.confidence);
         e.set("class", std::string(to_string(p.measured)));
+        e.set("role", std::string(to_string(p.role.role)));
+        e.set("role_confidence", p.role.confidence);
         e.set("effect", p.effect);
         e.set("response", std::string(response_name(p.response)));
         json::Array safe{json::Value(p.safe_lo), json::Value(p.safe_hi)};
@@ -110,6 +157,14 @@ json::Value Profile::to_json() const {
         pr.push_back(std::move(e));
     }
     v.set("pairs", json::Value(std::move(pr)));
+    v.set("constraints", ConstraintSet::to_json(constraints));
+    json::Value pc;
+    pc.set("method", std::string(to_string(pitch.method)));
+    pc.set("bend_range", pitch.bend_range);
+    pc.set("tuning_cents", pitch.tuning_cents);
+    pc.set("bend_cents", pitch.bend_cents);
+    if (!pitch.note.empty()) pc.set("note", pitch.note);
+    v.set("pitch", std::move(pc));
     return v;
 }
 
@@ -127,6 +182,7 @@ expected<Profile, std::string> Profile::from_json(const json::Value& v) {
     p.floor_db = v["floor_db"].as_number();
     p.embedding_floor = v["embedding_floor"].as_number();
     p.render_ms = v["render_ms"].as_number();
+    p.settle_ms = v["settle_ms"].as_number();
     for (const auto& e : v["params"].as_array()) {
         ParamProfile q;
         q.id = static_cast<std::uint32_t>(e["id"].as_number());
@@ -134,6 +190,8 @@ expected<Profile, std::string> Profile::from_json(const json::Value& v) {
         q.names.group = parse_group(e["group"].as_string());
         q.names.confidence = e["confidence"].as_number();
         q.measured = parse_probe_class(e["class"].as_string()).value_or(ProbeClass::Spectrum);
+        q.role.role = parse_role(e["role"].as_string());
+        q.role.confidence = e["role_confidence"].as_number();
         q.effect = e["effect"].as_number();
         q.response = parse_response(e["response"].as_string());
         const auto& safe = e["safe"].as_array();
@@ -152,6 +210,15 @@ expected<Profile, std::string> Profile::from_json(const json::Value& v) {
         q.separable = e["separable"].as_bool(true);
         p.pairs.push_back(q);
     }
+    auto cs = ConstraintSet::from_json(v["constraints"]);
+    if (!cs) return unexpected("profile: " + cs.error());
+    p.constraints = std::move(*cs);
+    const auto& pc = v["pitch"];
+    p.pitch.method = parse_pitch_method(pc["method"].as_string());
+    p.pitch.bend_range = pc["bend_range"].as_number();
+    p.pitch.tuning_cents = pc["tuning_cents"].as_number();
+    p.pitch.bend_cents = pc["bend_cents"].as_number();
+    p.pitch.note = pc["note"].as_string();
     return p;
 }
 

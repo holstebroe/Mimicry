@@ -27,6 +27,7 @@ union Event {
     clap_event_param_value_t param;
     clap_event_note_t note;
     clap_event_note_expression_t expression;
+    clap_event_midi_t midi;
 };
 
 class ClapEngine final : public Engine {
@@ -92,6 +93,10 @@ public:
         latency_ = static_cast<const clap_plugin_latency_t*>(plugin_->get_extension(plugin_, CLAP_EXT_LATENCY));
         audio_ports_ = static_cast<const clap_plugin_audio_ports_t*>(plugin_->get_extension(plugin_, CLAP_EXT_AUDIO_PORTS));
         note_ports_ = static_cast<const clap_plugin_note_ports_t*>(plugin_->get_extension(plugin_, CLAP_EXT_NOTE_PORTS));
+        // Offline rendering, as the VST3 backend's kOffline (spec 02 section 5): main thread, before activation.
+        if (const auto* render = static_cast<const clap_plugin_render_t*>(plugin_->get_extension(plugin_, CLAP_EXT_RENDER));
+            render && render->set && !(render->has_hard_realtime_requirement && render->has_hard_realtime_requirement(plugin_)))
+            offline_ = render->set(plugin_, CLAP_RENDER_OFFLINE);
 
         info_.format = PluginFormat::Clap;
         info_.uid = chosen->id;
@@ -119,7 +124,10 @@ public:
         if (out_channels_.empty()) return unexpected(HostError{"the plugin has no audio output port"});
         if (note_ports_ && note_ports_->count(plugin_, true) > 0) {
             clap_note_port_info_t ni{};
-            if (note_ports_->get(plugin_, 0, true, &ni)) clap_dialect_ = (ni.supported_dialects & CLAP_NOTE_DIALECT_CLAP) != 0;
+            if (note_ports_->get(plugin_, 0, true, &ni)) {
+                clap_dialect_ = (ni.supported_dialects & CLAP_NOTE_DIALECT_CLAP) != 0;
+                midi_dialect_ = (ni.supported_dialects & CLAP_NOTE_DIALECT_MIDI) != 0;
+            }
         }
         if (info_.kind == PluginKind::Unknown)
             info_.kind = (!in_channels_.empty() && !(note_ports_ && note_ports_->count(plugin_, true) > 0))
@@ -252,10 +260,20 @@ public:
             events_.push_back(e);
         }
         for (const NoteEvent& n : block.notes) {
+            if (n.set_bend && midi_dialect_) {  // MIDI pitch bend, channel 0, ahead of the note
+                const int v = std::clamp(static_cast<int>(std::lround(8192.0 + n.bend * 8192.0)), 0, 16383);
+                Event b{};
+                b.midi.header = {sizeof(clap_event_midi_t), n.frame, CLAP_CORE_EVENT_SPACE_ID, CLAP_EVENT_MIDI, 0};
+                b.midi.port_index = 0;
+                b.midi.data[0] = 0xE0;
+                b.midi.data[1] = static_cast<uint8_t>(v & 0x7F);
+                b.midi.data[2] = static_cast<uint8_t>(v >> 7);
+                events_.push_back(b);
+            }
             Event e{};
             int key = n.key;
             double cents = n.cents;
-            if (n.on && !clap_dialect_ && std::fabs(cents) > 0) {  // no expressions: nearest key
+            if (!clap_dialect_ && std::fabs(cents) > 0) {  // no expressions: nearest key, for the off as well
                 key += static_cast<int>(std::lround(cents / 100.0));
                 cents = 0;
             }
@@ -440,6 +458,8 @@ private:
     std::unordered_map<std::uint32_t, std::size_t> index_;
     std::vector<int> in_channels_, out_channels_;
     bool clap_dialect_ = true;
+    bool offline_ = false;  // the plugin accepted CLAP_RENDER_OFFLINE
+    bool midi_dialect_ = false;
 
     int rate_ = 48000;
     int max_block_ = 512;

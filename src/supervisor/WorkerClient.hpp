@@ -5,6 +5,7 @@
 
 #include <filesystem>
 #include <memory>
+#include <optional>
 #include <string>
 
 #include "core/Ipc.hpp"
@@ -15,12 +16,16 @@ namespace mimicry::supervisor {
 
 struct WorkerOptions {
     std::filesystem::path worker_exe;   // default: mimicry_worker next to the running executable
-    double min_timeout_s = 5.0;         // per-job wall clock: max(min_timeout_s, factor x audio duration) [D]
+    double min_timeout_s = 5.0;         // per-job wall clock: max(min_timeout_s, factor x audio duration incl. tail) [D]
     double timeout_factor = 20.0;
     double open_timeout_s = 60.0;       // loading a plugin can be slow
     double call_timeout_s = 30.0;       // state, value text, reset
     std::size_t shm_bytes = 128u << 20; // audio and state exchange area
     int recycle_after = 500;            // fresh process every N renders, bounds leaks and drift (spec 05 section 5)
+    // After a failed render, render the last job that passed (the canary); if it fails too, the plugin is
+    // poisoned beyond a reset and the worker restarts (spec 05 section 5).
+    bool canary = true;
+    double canary_tail_ms = 250.0;      // the canary's tail is cut to this [A]
 };
 
 struct WorkerStats {
@@ -28,6 +33,8 @@ struct WorkerStats {
     std::uint64_t crashes = 0;
     std::uint64_t timeouts = 0;
     std::uint64_t recycled = 0;
+    std::uint64_t canaries = 0;         // canary renders after a failure
+    std::uint64_t canary_restarts = 0;  // canaries that failed: worker restarted
 };
 
 class WorkerClient final : public host::Instance {
@@ -52,6 +59,10 @@ public:
     [[nodiscard]] expected<void, host::HostError> reset() override;
 
     [[nodiscard]] const WorkerStats& stats() const { return stats_; }
+    // Non-empty once the plugin's parameter table differs from the one it had when first opened (a restart
+    // request or a re-open renamed, added or removed parameters). Every render then fails with HostError:
+    // a run must stop rather than map stale ids (spec 05 section 9).
+    [[nodiscard]] const std::string& table_change() const { return table_change_; }
     // Test hook: the worker's process id, 0 if none is running.
     [[nodiscard]] long worker_pid() const { return process_.id() > 0 ? process_.id() : 0; }
 
@@ -64,6 +75,10 @@ private:
     enum class Call { Ok, Timeout, Crashed };
     Call call(const json::Value& request, double timeout_s, json::Value& reply, std::string& detail);
     void adopt(const json::Value& description);
+    [[nodiscard]] expected<host::Audio, Outcome> render_once(const host::Job& job);
+    // Blocks the worker started in the current render (the progress word in the shared memory).
+    [[nodiscard]] std::uint64_t blocks_done() const;
+    [[nodiscard]] std::size_t payload() const { return shm_.size() > ipc::kShmProgressBytes ? shm_.size() - ipc::kShmProgressBytes : 0; }
 
     std::filesystem::path plugin_;
     std::string uid_;
@@ -76,7 +91,10 @@ private:
     bool open_ = false;
 
     host::PluginInfo info_;
-    std::vector<host::ParamDesc> params_;
+    std::vector<host::ParamDesc> params_;    // the table of the first open: what callers index into
+    bool have_params_ = false;
+    std::string table_change_;
+    std::optional<host::Job> canary_;
     int tail_ = 0, latency_ = 0;
     std::uint64_t version_ = 1;
     std::string message_;

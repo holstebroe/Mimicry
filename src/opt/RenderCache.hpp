@@ -47,6 +47,7 @@ public:
         put(job.tail_max_ms);
         put(job.peak_limit);
         put(job.allow_silent);
+        put(job.bend_range);
         return k;
     }
 

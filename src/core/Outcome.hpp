@@ -18,6 +18,8 @@ enum class Outcome {
 };
 
 [[nodiscard]] std::string_view to_string(Outcome outcome) noexcept;
+// Inverse of to_string; unknown text reads as HostError.
+[[nodiscard]] Outcome parse_outcome(std::string_view text) noexcept;
 
 [[nodiscard]] constexpr bool is_valid(Outcome outcome) noexcept { return outcome == Outcome::Ok; }
 

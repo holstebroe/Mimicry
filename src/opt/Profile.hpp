@@ -15,6 +15,8 @@
 #include "core/Outcome.hpp"
 #include "core/ParamSemantics.hpp"
 #include "host/PluginHost.hpp"
+#include "opt/Constraints.hpp"
+#include "opt/PitchCalibration.hpp"
 
 namespace mimicry::opt {
 
@@ -29,10 +31,15 @@ enum class ProbeClass { Dead, Pitch, Brightness, Time, Level, Spectrum, Fx };
 // so the effect is uniform in log) or "exp" (most in the last quarter).
 enum class Response { Linear, Log, Exp };
 
+// Whether a measured class fits a role (spec 04 section 2): a confirmed role gains confidence, a contradicted one
+// loses most of it, a dead parameter (nothing to see at the defaults) leaves it as guessed [D].
+[[nodiscard]] RoleGuess confirm_role(RoleGuess guess, ProbeClass measured) noexcept;
+
 struct ParamProfile {
     std::uint32_t id = 0;
     std::string name;
     Semantics names;                 // the name guess
+    RoleGuess role;                  // role from name + units, confirmed or doubted by the probe
     ProbeClass measured = ProbeClass::Spectrum;
     double effect = 0;               // largest embedding change over the floor-based threshold
     Response response = Response::Linear;
@@ -53,8 +60,14 @@ struct Profile {
     double floor_db = 0;          // repeatability floor (spec 03 section 6)
     double embedding_floor = 0;   // embedding distance between two renders of the defaults
     double render_ms = 0;         // mean wall time per render during the probe
+    double settle_ms = 0;         // measured settle time (spec 05 section 6), 0 = unknown
     std::vector<ParamProfile> params;
     std::vector<PairProfile> pairs;
+    std::vector<Constraint> constraints;  // learned by failure bisection (spec 05 section 4), kept by `probe`
+    PitchCalibration pitch;               // how the plugin takes fine pitch (spec 02 section 5)
+
+    // False for a profile that only carries constraints (written by a fit before any probe).
+    [[nodiscard]] bool probed() const noexcept { return !params.empty(); }
 
     // Entry for this parameter, only when both id and name match.
     [[nodiscard]] const ParamProfile* find(const host::ParamDesc& p) const;

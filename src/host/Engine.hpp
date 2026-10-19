@@ -36,6 +36,9 @@ struct NoteEvent {
     double cents = 0;
     float velocity = 0.8f;
     std::int32_t note_id = 0;
+    // MIDI pitch bend sent right before this event (channel 0), -1..1 of the plugin's bend range.
+    bool set_bend = false;
+    double bend = 0;
 };
 
 struct Block {

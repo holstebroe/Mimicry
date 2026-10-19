@@ -70,7 +70,7 @@ feature code is one place.
 
 ```
 src/core/        Types, Rng, Json (minimal), Wav, Fft, Cma (cma + sep-cma),
-                 Sampling (LHS), ParamSemantics, Constraints
+                 Sampling (LHS), ParamSemantics
 src/features/    Spectral (PowerStft), Pitch, Preprocess, Features, Loss (Target, Scorer, Weights)
 src/host/        PluginHost.hpp (interface), Renderer (job -> blocks, shared by backends),
                  clap/ (loader, HostApi, instance), vst3/ (module, component/controller,
@@ -79,8 +79,10 @@ src/worker/      worker_main, Ipc, SharedMem
 src/supervisor/  Pool, Scheduler, Watchdog
 src/targets/     WavTarget, PluginTarget, ImageTarget, ProbePlan, ProbeSignals (effect inputs), Harvest
 src/opt/         RenderCache, Space (encoding), Objective (render + score), Embedding, Pipeline (stages,
-                 restarts, top-K diversity), Probe (sensitivity), Profile, Fingerprint, Surrogate
-src/output/      Report, AbWav, Ppm, PresetExport (state, params.json, .vstpreset), Svg, DoctorReport
+                 restarts, top-K diversity), Probe (sensitivity), Profile, Constraints (failure
+                 bisection, constraint store), Fingerprint, Surrogate
+src/output/      FailureReport, Report, AbWav, Ppm, PresetExport (state, params.json, .vstpreset), Svg,
+                 DoctorReport
 src/app/         main + commands
 src/gui/         (later) Graphics/Font/ModernDraw/window glue taken from Acidus
 src/tests/       unit + integration executables; test_synth/ (hazard plugin, built as CLAP and VST3)

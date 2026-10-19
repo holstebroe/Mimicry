@@ -61,14 +61,14 @@ All tests are executables run by `ctest`; DSP-style tests return non-zero on fai
 | T6 | Round trip (`rehearse`): 20 random presets of a test plugin, in each format; recovered loss under 1.5x floor in >= 90 % and normalised parameter error reported per parameter group |
 | T7 | Isolation: 1000 planted crashes/hangs, in each format; supervisor survives, no leaked handles, shared memory or zombies |
 | T8 | Bisection finds the planted constraint (`A > 0.8 && B > 0.9`) with thresholds within 2 %, in each format |
-| T9 | Poisoned state: after a NaN-poisoning combination, the next valid render is correct (canary), in each format |
+| T9 | Poisoned state: after a NaN-poisoning combination, the next valid render is correct (canary), in each format; poison that survives reset and state load fails the canary and restarts the worker |
 | T10 | Output: `ab.wav` layout and levels, `best.state` reloads and reproduces the match, `diff.ppm` valid |
 | T11 | Plugin-to-plugin: Acidus calibration build as source and target with different calibration profiles; recover the profile within tolerance (the Acidus `--rehearse` idea [S]) |
 | T12 | Throughput: renders/s on the reference machine, per format, reported (target: >= 50 evals/s for a light synth on 8 cores [D]) |
 | T13 | **Backend equivalence**: `mimicry_test_synth` as CLAP and as VST3 gives the same parameters (ids, names, units) and renders within the repeatability floor for the same musical settings |
 | T14 | `.vstpreset` round trip: write, load back through the VST3 backend, render, equal to the original render; SDK validator passes on `mimicry_test_synth_vst3` |
 | T15 | **Cross-format transfer**: Acidus as CLAP source, `acidus_vst3` as target (the same engine through the wrapper): the optimizer recovers the source parameters within tolerance, and the reverse |
-| T16 | VST3 hosting specifics: restart request handling, program-change pinning, offline mode set, tuning cents honoured on `NoteOnEvent` |
+| T16 | VST3 hosting specifics: restart request handling, program-change pinning, offline mode set, tuning cents honoured on `NoteOnEvent` (run for both formats in `host_*`; table changes after a restart in `worker_*`) |
 | T17 | **Harvest**: the test synth's factory presets found and loaded through CLAP preset discovery, VST3 program data, the VST3 program list and MIDI program change; every preset `ok`, the planted duplicate and the planted no-op preset reported as such; the recipe is stored and reused; source renders from the captured state equal renders from the preset's parameters |
 | T18 | **Effects**: `mimicry_test_fx` (CLAP and VST3) renders the probe signals with input and latency compensation in both formats; reamp fit and effect-to-effect transfer recover random presets within 1.5x the floor; effect features pass their T4 cases |
 | T19 | **Map**: test synth CLAP → test synth VST3 maps every parameter to itself with full confidence; against a renamed and re-tapered variant, roles and laws are recovered within tolerance |
@@ -83,6 +83,17 @@ parameter, used by T6-T9: a NaN above a threshold; a null dereference when two p
 a sleep (hang) at one combination; a filter state that stays poisoned after a bad combination; a random
 LFO phase (repeatability floor) with a seed parameter; a program-change parameter and a parameter that
 requests a component restart (for T16). It is also the first thing the host is developed against.
+Three more hazards test spec 05 §5 and §9 [A]: *Hazard Sticky* (NaN for the life of the instance,
+surviving reset, re-activation and state load, so only the canary's worker restart clears it), *Hazard
+Throw* (`process` throws a C++ exception) and the hidden *Hazard Rename* (renames *Hidden Drive* and asks
+for a parameter rescan, so the parameter table changes mid-run). They are appended to the table, so no
+earlier id moves. For pitch (02 §5) it takes MIDI pitch bend on a note port with the MIDI dialect, and two
+hidden parameters: *Ignore Tuning* (tuning has no effect, so only bend moves the pitch) and *Bend Range*
+(1-24 semitones, default 2) [A]. A hidden *Require Offline* switch outputs NaN unless the host set
+offline rendering (CLAP `render` extension, VST3 `kOffline` passed on by clap-wrapper): T16's "offline
+mode set" check [A]. A hidden *Smoothing* parameter (ms, default 0) glides Level and Cutoff from their
+defaults with a one-pole after every activation, for the settle-time probe (05 §6) [A]. The VST3 build therefore carries clap-wrapper's MIDI-mapping proxies (left
+out of the table, 02 §4) and its MIDI program-change parameter (pinned, never sent).
 
 For T17 it exposes a small factory bank (CLAP preset discovery, VST3 program list with program data,
 MIDI program change), including one duplicate and one preset that changes nothing. **`mimicry_test_fx`**

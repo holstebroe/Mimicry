@@ -13,6 +13,7 @@
 #include <string>
 #include <vector>
 
+#include "opt/Constraints.hpp"
 #include "opt/Objective.hpp"
 #include "opt/Space.hpp"
 
@@ -47,6 +48,16 @@ struct PipelineOptions {
     // Surrogate pre-screening (spec 04 section 7): auto above this many seconds per candidate; < 0 off,
     // 0 always on.
     double surrogate_above_s = 1.0;
+    // Hazard constraints (spec 05 sections 3-4): the set the run tests candidates against, learns into and
+    // updates (the caller stores it in the profile). Null: no resampling, no bisection.
+    ConstraintSet* constraints = nullptr;
+    int resample = 5;             // redraws of a CMA-ES sample inside a constraint before it is rendered anyway [D]
+    int max_bisections = 6;       // new failures bisected per run [D]
+    BisectOptions bisect;
+    int max_failure_examples = 32;  // distinct failures kept for the failure reports (spec 05 section 7) [D]
+    // Polled between batches; true stops the run at once (e.g. the plugin's parameter table changed,
+    // spec 05 section 9). The result is then marked `aborted`.
+    std::function<bool()> abort;
     std::vector<int> stages;      // empty = all of 1..7 (--stages)
     std::uint64_t seed = 1;
     double progress_interval_s = 15;  // [S]
@@ -58,6 +69,15 @@ struct Candidate {
     std::vector<double> coords;  // full vector
     Evaluation eval;
     double fitness = 0;          // loss + boundary penalty + prior (ranked by CMA-ES)
+};
+
+// One distinct failure for a failure report (spec 05 section 7): per outcome one example, plus one per
+// bisected minimal set.
+struct FailureExample {
+    std::vector<double> coords;       // the full vector that failed
+    Outcome outcome = Outcome::Crash;
+    std::vector<std::size_t> minimal; // S from the bisection (parameter indices), empty when not bisected
+    std::vector<double> threshold;    // per entry of `minimal`
 };
 
 struct StageReport {
@@ -77,6 +97,13 @@ struct PipelineResult {
     double seconds = 0;
     bool time_capped = false;
     bool surrogate_used = false;
+    long resampled = 0;            // samples redrawn because they fell inside a constraint
+    long skipped = 0;              // S1 points not rendered because they fell inside a constraint
+    int bisections = 0;            // failures bisected
+    long bisect_renders = 0;       // renders spent bisecting (not counted in evals)
+    std::vector<Constraint> learned;  // constraints found by this run's bisections
+    std::vector<FailureExample> failures;
+    bool aborted = false;             // options.abort stopped the run
 };
 
 // `seeds` are extra full vectors for S1 (fingerprint neighbours, a warm start).

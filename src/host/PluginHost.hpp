@@ -88,6 +88,9 @@ struct Job {
     double tail_max_ms = 8000;
     double peak_limit = 50;      // spec 05 section 2 [S: Acidus]
     bool allow_silent = false;   // the target itself is silent
+    // > 0: a note's cents go out as MIDI pitch bend with this measured range in semitones instead of the
+    // format's tuning (spec 02 section 5, for plugins that ignore tuning). Bend is channel-wide.
+    double bend_range = 0;
 };
 
 struct Audio {
@@ -114,6 +117,10 @@ public:
     [[nodiscard]] virtual std::uint64_t parameters_version() const = 0;
     // Main thread: lets the plugin run its pending main-thread callbacks and drains the system queue.
     virtual void pump() = 0;
+    // Optional progress word, incremented (atomically) as every block of a render starts, so a supervisor
+    // that killed a hung worker can tell "never reached the first block" (spec 05 section 9).
+    // Null turns it off; the word must stay valid while set.
+    virtual void set_block_counter(std::uint64_t* /*counter*/) {}
 
     [[nodiscard]] virtual expected<std::vector<std::uint8_t>, HostError> save_state() = 0;
     [[nodiscard]] virtual expected<void, HostError> load_state(const std::vector<std::uint8_t>& blob) = 0;

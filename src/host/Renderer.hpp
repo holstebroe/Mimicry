@@ -52,6 +52,7 @@ public:
     [[nodiscard]] int latency_samples() const override { return engine_->latency_samples(); }
     [[nodiscard]] std::uint64_t parameters_version() const override { return version_; }
     void pump() override;
+    void set_block_counter(std::uint64_t* counter) override { blocks_ = counter; }
 
     [[nodiscard]] expected<std::vector<std::uint8_t>, HostError> save_state() override;
     [[nodiscard]] expected<void, HostError> load_state(const std::vector<std::uint8_t>& blob) override;
@@ -63,7 +64,12 @@ public:
 
 private:
     [[nodiscard]] expected<void, HostError> restart_engine();
+    [[nodiscard]] expected<Audio, Outcome> render_once(const Job& job);
     [[nodiscard]] Outcome fail(Outcome outcome, std::string message);
+    // After a failed render (spec 05 section 5): reset, then load the clean state taken at start.
+    void recover();
+    // Pending main-thread callbacks, then a requested restart: re-enumerate and bump the version.
+    [[nodiscard]] expected<void, HostError> handle_restart_request();
 
     std::unique_ptr<Engine> engine_;
     std::shared_ptr<ThreadRoles> roles_;
@@ -75,6 +81,9 @@ private:
     bool reset_each_render_ = true;
     std::uint64_t version_ = 1;
     std::string message_;
+    std::vector<std::uint8_t> clean_;  // state right after the first activation
+    bool have_clean_ = false;
+    std::uint64_t* blocks_ = nullptr;
 };
 
 }  // namespace mimicry::host

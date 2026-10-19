@@ -1,5 +1,5 @@
 // mimicry: supervisor / command line (docs/spec/01_ARCHITECTURE.md section 6).
-// Implemented: list, probe, fit, fingerprint. The rest are implemented in the order of docs/PROJECT_PLAN.md.
+// Implemented: list, probe, fit, fingerprint, replay. The rest are implemented in the order of docs/PROJECT_PLAN.md.
 // Plugins are only ever loaded in mimicry_worker processes (CLAUDE.md rule 4); --no-isolation renders
 // in-process for debugging.
 
@@ -29,9 +29,12 @@
 #include "opt/Fingerprint.hpp"
 #include "opt/Objective.hpp"
 #include "opt/Pipeline.hpp"
+#include "opt/PitchCalibration.hpp"
 #include "opt/Probe.hpp"
 #include "opt/Profile.hpp"
 #include "opt/Space.hpp"
+#include "output/FailureReport.hpp"
+#include "supervisor/WorkerClient.hpp"
 #include "supervisor/WorkerPool.hpp"
 
 namespace {
@@ -54,7 +57,7 @@ constexpr Command kCommands[] = {
     {"fingerprint", "fingerprint <plugin>", "build the random-preset feature database"},
     {"rehearse", "rehearse <plugin>", "round-trip self-test"},
     {"eval", "eval --plugin P --state S --wav T.wav", "score a state without fitting"},
-    {"replay", "replay <crash.json>", "re-run a recorded failure in-process"},
+    {"replay", "replay <crash.json>", "re-run a recorded failure (in-process unless --isolated)"},
 };
 
 void print_usage() {
@@ -67,6 +70,7 @@ common options:
   --no-isolation       render in this process (debugging only)
   --profiles DIR       plugin profiles and fingerprint databases (default: profiles)
   --note C3            target pitch override; --gate MS note length
+  --settle-ms MS       silence after the parameters, before the notes (default 250, or the profile's)
 
 fit options:
   --minutes M          time cap (default 20)        --patience S   seconds without improvement (240)
@@ -78,8 +82,9 @@ fit options:
   --out DIR            run directory root (default: runs)
 
 probe options: --no-pairs      fingerprint options: --count N (2000)
+replay options: --plugin P (default: the path in the report)   --isolated (render in a worker)
 
-<plugin> is a .clap or .vst3 path. transfer, image, rehearse, eval and replay are not implemented yet;
+<plugin> is a .clap or .vst3 path. transfer, image, rehearse and eval are not implemented yet;
 see docs/PROJECT_PLAN.md for the order.
 )";
     std::fputs(text.c_str(), stdout);
@@ -115,7 +120,7 @@ struct Args {
     }
 };
 
-constexpr std::string_view kFlags[] = {"--no-isolation", "--no-prior", "--no-pairs", "--solve-gain"};
+constexpr std::string_view kFlags[] = {"--no-isolation", "--no-prior", "--no-pairs", "--solve-gain", "--isolated"};
 
 Args parse_args(int argc, char** argv, int first) {
     Args a;
@@ -168,11 +173,11 @@ struct Plugin {
 };
 
 expected<std::unique_ptr<Plugin>, std::string> open_plugin(const std::string& path, const Args& args) {
-    if (auto f = host::format_from_path(path); !f) return unexpected(f.error());
+    if (auto f = host::format_from_path(path); !f) return mimicry::unexpected(f.error());
     auto p = std::make_unique<Plugin>();
     if (args.has("--no-isolation")) {
         auto inst = host::open(path);
-        if (!inst) return unexpected(inst.error().message);
+        if (!inst) return mimicry::unexpected(inst.error().message);
         p->local = std::move(*inst);
         p->info = p->local->info();
         p->params = p->local->parameters();
@@ -181,7 +186,7 @@ expected<std::unique_ptr<Plugin>, std::string> open_plugin(const std::string& pa
     const int cores = int(std::max(1u, std::thread::hardware_concurrency()));
     const int workers = int(args.num("--workers", std::max(1, cores - 1)));
     auto pool = supervisor::WorkerPool::open(path, {}, workers);
-    if (!pool) return unexpected(pool.error().message);
+    if (!pool) return mimicry::unexpected(pool.error().message);
     p->pool = std::move(*pool);
     p->info = p->pool->client(0).info();
     p->params = p->pool->client(0).parameters();
@@ -226,13 +231,15 @@ int cmd_list(const Args& a) {
     std::string out = std::format("{} {} ({}), uid {}, version {}\n", host::to_string(p.info.format), p.info.name,
                                   p.info.vendor, p.info.uid, p.info.version_hash);
     const auto space = opt::Space::build(p.params, p.info.format, profile ? &*profile : nullptr, opt::SpaceOptions{});
-    out += std::format("{:>8}  {:<24} {:<14} {:<6} {:>5}  {:<12} {:<12} {}\n", "id", "name", "module", "units", "steps",
-                       "group", "role", "flags");
+    out += std::format("{:>8}  {:<24} {:<14} {:<6} {:>5}  {:<12} {:<22} {:<12} {}\n", "id", "name", "module", "units", "steps",
+                       "group", "param role", "search", "flags");
     for (std::size_t i = 0; i < p.params.size(); ++i) {
         const auto& d = p.params[i];
         const auto& s = space.slot(i);
-        out += std::format("{:>8}  {:<24} {:<14} {:<6} {:>5}  {:<6} {:.2f}  {:<12} {}{}\n", d.id, d.name, d.module, d.units,
-                           d.steps, to_string(s.group), s.names.confidence, to_string(s.role), flags_text(d.flags),
+        const auto pr = s.param_role.role == ParamRole::None ? std::string("-")
+                                                             : std::format("{} {:.2f}", to_string(s.param_role.role), s.param_role.confidence);
+        out += std::format("{:>8}  {:<24} {:<14} {:<6} {:>5}  {:<6} {:.2f}  {:<22} {:<12} {}{}\n", d.id, d.name, d.module, d.units,
+                           d.steps, to_string(s.group), s.names.confidence, pr, to_string(s.role), flags_text(d.flags),
                            s.why.empty() ? "" : "(" + s.why + ")");
     }
     std::fputs(out.c_str(), stdout);
@@ -252,12 +259,16 @@ int cmd_probe(const Args& a) {
     }
     opt::ProbeOptions po;
     po.job = note_job(a, key, 0, 800);
+    po.job.settle_ms = a.num("--settle-ms", po.job.settle_ms);
     po.job.tail_max_ms = 3000;
     po.pairs = !a.has("--no-pairs");
     po.log = [](const std::string& s) { std::fputs((s + "\n").c_str(), stdout); };
     std::fputs(std::format("probing {} parameters with {} worker(s)...\n", p.params.size(), p.workers()).c_str(), stdout);
     auto prof = opt::probe(p.batch(), p.info, p.params, po);
     if (!prof) return fail("probe", prof.error());
+    if (p.pool && !p.pool->table_change().empty())
+        return fail("probe", "the plugin changed its parameter table during the probe (" + p.pool->table_change() +
+                                 "); the probe is not valid for either table");
     std::string out;
     for (const auto& e : prof->params) {
         std::string oc;
@@ -271,6 +282,7 @@ int cmd_probe(const Args& a) {
     out += std::format("floor {:.3f} dB, {:.1f} ms per render, {} pairs probed, {} interact\n", prof->floor_db,
                        prof->render_ms, prof->pairs.size(), joined);
     const auto path = opt::Profile::default_path(profiles_dir(a), p.info);
+    if (const auto old = load_profile(a, p.info)) prof->constraints = old->constraints;  // learned by earlier fits
     if (auto r = prof->save(path); !r) return fail("probe", r.error());
     out += "wrote " + path.string() + "\n";
     std::fputs(out.c_str(), stdout);
@@ -283,7 +295,8 @@ int cmd_fingerprint(const Args& a) {
     if (!plugin) return fail("fingerprint", plugin.error());
     auto& p = **plugin;
     const auto profile = load_profile(a, p.info);
-    if (!profile) std::fputs("note: no profile; run `mimicry probe` first for a safe box and dead parameters\n", stderr);
+    if (!profile || !profile->probed())
+        std::fputs("note: no profile; run `mimicry probe` first for a safe box and dead parameters\n", stderr);
     const auto space = opt::Space::build(p.params, p.info.format, profile ? &*profile : nullptr, opt::SpaceOptions{});
     opt::FingerprintOptions fo;
     int key = 48;
@@ -355,13 +368,24 @@ int cmd_fit(const Args& a) {
     auto plugin = open_plugin(plugin_path, a);
     if (!plugin) return fail("fit", plugin.error());
     auto& p = **plugin;
-    const auto profile = load_profile(a, p.info);
+    const auto stored = load_profile(a, p.info);
+    // A profile written by an earlier fit before any probe carries only constraints.
+    const auto profile = stored && stored->probed() ? stored : std::nullopt;
     if (!profile) std::fputs("note: no plugin profile; `mimicry probe` first makes the fit faster and safer\n", stderr);
+    opt::ConstraintSet constraints(p.params);
+    if (stored) {
+        const auto n = constraints.adopt(stored->constraints);
+        if (n) std::fputs(std::format("profile: {} hazard constraint(s)\n", n).c_str(), stdout);
+    }
 
     // S0: the target's pitch is applied to the note (spec 04 section 4), so pitch-only parameters are pinned.
     const bool pitched = an.f0 > 0 && an.kind == features::SampleKind::Note;
     host::Job job = note_job(a, pitched ? an.key : 60, pitched ? an.cents : 0.0, std::max(50.0, an.duration_ms));
     job.sample_rate = ao.sample_rate;
+    // Settle (spec 05 section 6): 1.5 x the probe's measurement when that is longer than the default [D];
+    // --settle-ms decides outright.
+    if (profile && profile->settle_ms * 1.5 > job.settle_ms) job.settle_ms = profile->settle_ms * 1.5;
+    job.settle_ms = a.num("--settle-ms", job.settle_ms);
     opt::SpaceOptions so;
     const std::string mode = a.get("--mode", "hybrid");
     so.mode = mode == "guided" ? opt::Mode::Guided : mode == "unsupervised" ? opt::Mode::Unsupervised : opt::Mode::Hybrid;
@@ -369,6 +393,26 @@ int cmd_fit(const Args& a) {
     so.fix = split(a.get("--fix"));
     so.pin_pitch = pitched;
     const auto space = opt::Space::build(p.params, p.info.format, profile ? &*profile : nullptr, so);
+
+    // How the plugin takes the cents (spec 02 section 5): from the profile, else three calibration renders.
+    opt::PitchCalibration pitch;
+    bool pitch_measured = false;
+    if (pitched) {
+        if (stored && stored->pitch.method != opt::PitchMethod::Unknown) {
+            pitch = stored->pitch;
+        } else {
+            host::Job cj = job;
+            cj.coords = space.defaults();
+            pitch = opt::calibrate_pitch(p.batch(), cj);
+            pitch_measured = pitch.method != opt::PitchMethod::Unknown;
+        }
+        opt::apply_pitch_method(pitch, job);
+        std::fputs(std::format("pitch: {}{}\n", to_string(pitch.method),
+                               pitch.method == opt::PitchMethod::Bend ? std::format(" (bend range {:.2f} semitones)", pitch.bend_range)
+                               : pitch.method == opt::PitchMethod::NearestKey
+                                   ? std::format(" ({:+.1f} cents cannot be played)", an.cents)
+                                   : std::string()).c_str(), stdout);
+    }
 
     auto weights = features::Weights::preset(an.kind);
     for (const auto& [k, v] : a.opts)
@@ -400,6 +444,8 @@ int cmd_fit(const Args& a) {
     po.top_k = int(a.num("--top-k", po.top_k));
     po.seed = std::uint64_t(a.num("--seed", 1));
     po.prior = !a.has("--no-prior");
+    po.constraints = &constraints;
+    if (p.pool) po.abort = [&p] { return !p.pool->table_change().empty(); };
     for (const auto& s : split(a.get("--stages"))) po.stages.push_back(std::atoi(s.c_str()));
     po.log = [](const std::string& s) { std::fputs((s + "\n").c_str(), stdout); };
     po.progress = [](const opt::Progress& pr) {
@@ -409,6 +455,24 @@ int cmd_fit(const Args& a) {
                            host::to_string(p.info.format), p.info.name, space.active().size(), space.categorical().size(),
                            p.workers(), to_string(so.mode)).c_str(), stdout);
     const auto res = opt::run_pipeline(obj, space, po, seeds);
+    // Learned and updated constraints go back into the profile (spec 05 section 4), even when the fit failed.
+    if (!constraints.empty() || (stored && !stored->constraints.empty()) || pitch_measured) {
+        opt::Profile out = stored ? *stored : opt::Profile{};
+        if (!stored) {
+            out.format = p.info.format;
+            out.uid = p.info.uid;
+            out.name = p.info.name;
+            out.vendor = p.info.vendor;
+            out.version_hash = p.info.version_hash;
+        }
+        out.constraints = constraints.constraints();
+        if (pitch_measured) out.pitch = pitch;
+        const auto path = opt::Profile::default_path(profiles_dir(a), p.info);
+        if (auto r = out.save(path); !r) std::fputs(std::format("note: {}\n", r.error()).c_str(), stderr);
+    }
+    if (res.aborted)
+        return fail("fit", "stopped: the plugin changed its parameter table during the run (" + p.pool->table_change() +
+                               "); ids would no longer mean the same parameters (spec 05 section 9)");
     if (!res.best.eval.ok()) return fail("fit", "no valid candidate was found");
 
     // Run directory (spec 07 section 1).
@@ -443,6 +507,23 @@ int cmd_fit(const Args& a) {
     save_match(res.best, dir / "best");
     fs::rename(dir / "best.wav", dir / "match.wav", ec);
     for (std::size_t i = 0; i < res.top_k.size(); ++i) save_match(res.top_k[i], dir / "top-k" / std::to_string(i + 1));
+
+    // crashes/: one report per distinct failure (spec 05 section 7), replayable with `mimicry replay`.
+    int reports = 0;
+    for (const auto& f : res.failures) {
+        output::FailureReport fr;
+        fr.info = p.info;
+        fr.plugin_path = fs::absolute(plugin_path).string();
+        fr.job = job;
+        fr.job.coords = f.coords;
+        fr.outcome = f.outcome;
+        fr.set_params(p.params);
+        for (std::size_t i = 0; i < fr.params.size(); ++i) fr.params[i].text = text(p.params[i].id, f.coords[i]);
+        for (std::size_t k = 0; k < f.minimal.size(); ++k)
+            fr.minimal.push_back({p.params[f.minimal[k]].id, p.params[f.minimal[k]].name, k < f.threshold.size() ? f.threshold[k] : 0.0});
+        if (auto w = fr.write(dir / "crashes"); w) ++reports;
+        else std::fputs(std::format("note: {}\n", w.error()).c_str(), stderr);
+    }
 
     // ab.wav: target, 0.3 s of silence, match scaled by the solved gain (same scale for both) [S].
     if (auto audio = obj.render(res.best.coords)) {
@@ -497,6 +578,28 @@ int cmd_fit(const Args& a) {
     json::Object outcomes;
     for (const auto& [o, n] : res.outcomes) outcomes[std::string(to_string(o))] = static_cast<std::int64_t>(n);
     result.set("outcomes", json::Value(std::move(outcomes)));
+    json::Value hz;
+    hz.set("learned", opt::ConstraintSet::to_json(res.learned));
+    hz.set("known", static_cast<std::int64_t>(constraints.constraints().size()));
+    hz.set("dropped", constraints.dropped());
+    hz.set("bisections", res.bisections);
+    hz.set("bisect_renders", static_cast<std::int64_t>(res.bisect_renders));
+    hz.set("resampled", static_cast<std::int64_t>(res.resampled));
+    hz.set("skipped", static_cast<std::int64_t>(res.skipped));
+    result.set("constraints", std::move(hz));
+    result.set("failure_reports", static_cast<std::int64_t>(res.failures.size()));
+    double residual = 0;
+    if (pitched) {
+        if (auto audio = obj.render(res.best.coords)) residual = opt::pitch_residual_cents(*audio, an.f0);
+        json::Value pj;
+        pj.set("method", std::string(to_string(pitch.method)));
+        pj.set("bend_range", pitch.bend_range);
+        pj.set("target_f0", an.f0);
+        pj.set("key", an.key);
+        pj.set("cents", an.cents);
+        pj.set("residual_cents", residual);  // measured pitch of the match against the target (spec 02 section 5)
+        result.set("pitch", std::move(pj));
+    }
     json::Array topk;
     for (const auto& t : res.top_k) topk.push_back(t.eval.loss);
     result.set("top_k_loss_db", json::Value(std::move(topk)));
@@ -508,9 +611,57 @@ int cmd_fit(const Args& a) {
         summary += std::format("  {:<26} {:3} free  {:8.3f} -> {:8.3f} dB  {:6} evals\n", s.name, s.free, s.before, s.after, s.evals);
     for (const auto& [o, n] : res.outcomes)
         if (o != Outcome::Ok) summary += std::format("  {} {} candidate(s)\n", n, to_string(o));
+    for (const auto& c : res.learned) summary += "  learned: " + c.describe() + "\n";
+    if (pitched) summary += std::format("  pitch: {}, residual {:+.1f} cents\n", to_string(pitch.method), residual);
+    if (res.resampled + res.skipped > 0)
+        summary += std::format("  {} sample(s) redrawn and {} seed point(s) skipped inside known constraints\n",
+                               res.resampled, res.skipped);
+    if (reports) summary += std::format("  {} failure report(s) in crashes/ (mimicry replay <file>)\n", reports);
     summary += "wrote " + dir.string() + " (listen to ab.wav)\n";
     std::fputs(summary.c_str(), stdout);
     return 0;
+}
+
+// Re-runs a failure report (spec 05 section 7). In-process by default, so the plugin can be watched under
+// a debugger (a crash then takes mimicry down: that is the point); --isolated renders in a worker.
+int cmd_replay(const Args& a) {
+    if (a.positional.empty()) return fail("replay", "usage: mimicry replay <crash.json> [--plugin P] [--isolated]");
+    auto report = output::FailureReport::load(a.positional[0]);
+    if (!report) return fail("replay", report.error());
+    const std::string path = a.get("--plugin", report->plugin_path);
+    if (path.empty()) return fail("replay", "the report names no plugin path; pass --plugin");
+    std::unique_ptr<host::Instance> inst;
+    if (a.has("--isolated")) {
+        auto c = supervisor::WorkerClient::open(path, report->info.uid);
+        if (!c) return fail("replay", c.error().message);
+        inst = std::move(*c);
+    } else {
+        auto c = host::open(path, report->info.uid);
+        if (!c) return fail("replay", c.error().message);
+        inst = std::move(*c);
+    }
+    const auto& info = inst->info();
+    if (info.format != report->info.format || info.uid != report->info.uid)
+        return fail("replay", std::format("{} is {} {}, the report is for {} {}", path, host::to_string(info.format), info.uid,
+                                          host::to_string(report->info.format), report->info.uid));
+    if (info.version_hash != report->info.version_hash)
+        std::fputs(std::format("note: plugin version {} differs from the report's {}\n", info.version_hash,
+                               report->info.version_hash).c_str(), stderr);
+    std::vector<std::string> missing;
+    host::Job job = report->job;
+    job.coords = report->coords_for(inst->parameters(), &missing);
+    for (const auto& m : missing) std::fputs(std::format("note: parameter {} is not in this build\n", m).c_str(), stderr);
+    std::string s = std::format("replaying {} on {} {} ({}){}\n", to_string(report->outcome), host::to_string(info.format),
+                                info.name, a.has("--isolated") ? "worker" : "in-process", report->message.empty() ? "" : ": " + report->message);
+    for (const auto& m : report->minimal) s += std::format("  minimal set: {} (id {}) threshold {:.4f}\n", m.name, m.id, m.threshold);
+    std::fputs(s.c_str(), stdout);
+    std::fflush(stdout);
+    const auto r = inst->render(job);
+    const Outcome got = r ? Outcome::Ok : r.error();
+    const bool same = got == report->outcome;
+    std::fputs(std::format("result: {}{} -> {}\n", to_string(got), inst->last_message().empty() ? "" : " (" + inst->last_message() + ")",
+                           same ? "reproduced" : "NOT reproduced").c_str(), stdout);
+    return same ? 0 : 3;
 }
 
 }  // namespace
@@ -534,6 +685,7 @@ int main(int argc, char** argv) {
     if (cmd == "probe") return cmd_probe(args);
     if (cmd == "fit") return cmd_fit(args);
     if (cmd == "fingerprint") return cmd_fingerprint(args);
+    if (cmd == "replay") return cmd_replay(args);
     for (const auto& c : kCommands)
         if (c.name == cmd) return not_implemented(cmd);
     std::fputs(std::format("mimicry: unknown command '{}' (try --help)\n", cmd).c_str(), stderr);
