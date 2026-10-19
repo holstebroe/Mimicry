@@ -16,7 +16,7 @@ namespace mimicry::supervisor {
 
 struct WorkerOptions {
     std::filesystem::path worker_exe;   // default: mimicry_worker next to the running executable
-    double min_timeout_s = 5.0;         // per-job wall clock: max(min_timeout_s, factor x audio duration) [D]
+    double min_timeout_s = 5.0;         // per-job wall clock: max(min_timeout_s, factor x audio duration incl. tail) [D]
     double timeout_factor = 20.0;
     double open_timeout_s = 60.0;       // loading a plugin can be slow
     double call_timeout_s = 30.0;       // state, value text, reset
@@ -25,6 +25,7 @@ struct WorkerOptions {
     // After a failed render, render the last job that passed (the canary); if it fails too, the plugin is
     // poisoned beyond a reset and the worker restarts (spec 05 section 5).
     bool canary = true;
+    double canary_tail_ms = 250.0;      // the canary's tail is cut to this [A]
 };
 
 struct WorkerStats {

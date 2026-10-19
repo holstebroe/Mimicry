@@ -234,8 +234,9 @@ expected<Audio, Outcome> Renderer::render_once(const Job& job) {
             on.cents = 0;
         }
         events.push_back(on);
+        // The off carries the on's cents: a backend that rounds cents to a key must release the same key.
         events.push_back({static_cast<std::uint32_t>(std::max(frames_for(std::max(n.off_ms, n.on_ms), rate), 0)),
-                          false, n.key, 0.0, 0.0f, id});
+                          false, n.key, on.cents, 0.0f, id});
         plan_end_ms = std::max(plan_end_ms, std::max(n.off_ms, n.on_ms));
     }
     // Note-off before note-on at the same frame would release a note that has not started: keep the
@@ -245,7 +246,9 @@ expected<Audio, Outcome> Renderer::render_once(const Job& job) {
 
     const std::int64_t plan_end = frames_for(plan_end_ms, rate);
     const std::int64_t tail_max = std::max(frames_for(job.tail_max_ms, rate), 0);
-    const std::int64_t hard_end = plan_end + tail_max;
+    // At least one frame past the last event, so an event at plan_end is delivered even without a tail.
+    const std::int64_t last_event = events.empty() ? 0 : static_cast<std::int64_t>(events.back().frame) + 1;
+    const std::int64_t hard_end = std::max(plan_end + tail_max, last_event);
     const int quiet_needed = frames_for(kQuietSeconds * 1000.0, rate);
     const double quiet_linear = std::pow(10.0, kQuietDb / 20.0);
 

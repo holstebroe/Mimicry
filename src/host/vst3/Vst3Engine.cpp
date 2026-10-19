@@ -288,7 +288,8 @@ public:
     }
 
     expected<void, HostError> start() override {
-        if (processor_->setProcessing(true) != kResultOk && processor_->setProcessing(true) != kNotImplemented)
+        const tresult r = processor_->setProcessing(true);  // once: a second call would unbalance the plugin
+        if (r != kResultOk && r != kNotImplemented)
             return unexpected(HostError{"setProcessing(true) failed"});
         return {};
     }
@@ -307,6 +308,10 @@ public:
             if (auto* q = changes_.addParameterData(pv.id, index)) q->addPoint(0, std::clamp(pv.coord, 0.0, 1.0), index);
         }
         events_.clear();
+        if (block.notes.size() > static_cast<std::size_t>(events_capacity_)) {  // grow like the CLAP backend
+            events_capacity_ = static_cast<int32>(std::max<std::size_t>(block.notes.size(), 2 * static_cast<std::size_t>(events_capacity_)));
+            events_.setMaxSize(events_capacity_);
+        }
         for (const NoteEvent& n : block.notes) {
             if (n.set_bend && bend_param_) {  // normalised bend: 0.5 is centre
                 int32 index = 0;
@@ -334,7 +339,7 @@ public:
                 e.noteOff.noteId = n.note_id;
                 e.noteOff.tuning = 0;
             }
-            events_.addEvent(e);
+            if (events_.addEvent(e) != kResultOk) return unexpected(HostError{"note event list full"});
         }
 
         ProcessContext ctx{};
@@ -454,7 +459,8 @@ private:
 
     HostProcessData data_;
     ParameterChanges changes_, out_changes_;
-    EventList events_{64};
+    int32 events_capacity_ = 64;
+    EventList events_{events_capacity_};
     int rate_ = 48000, max_block_ = 512, out_channels_ = 2;
     std::int64_t position_ = 0;
     bool active_ = false;

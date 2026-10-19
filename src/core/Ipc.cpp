@@ -1,6 +1,7 @@
 #include "core/Ipc.hpp"
 
 #include <atomic>
+#include <chrono>
 #include <format>
 #include <mutex>
 
@@ -58,6 +59,8 @@ bool LineChannel::write_line(std::string_view line) {
 }
 
 LineChannel::Read LineChannel::read_line(std::string& out, int timeout_ms) {
+    // One deadline for the whole line: output that trickles in without a newline must not keep it alive.
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms < 0 ? 0 : timeout_ms);
     for (;;) {
         const auto nl = buffer_.find('\n');
         if (nl != std::string::npos) {
@@ -65,8 +68,14 @@ LineChannel::Read LineChannel::read_line(std::string& out, int timeout_ms) {
             buffer_.erase(0, nl + 1);
             return Read::Line;
         }
+        int wait_ms = -1;
+        if (timeout_ms >= 0) {
+            const auto left = std::chrono::duration_cast<std::chrono::milliseconds>(deadline - std::chrono::steady_clock::now()).count();
+            if (left <= 0) return Read::Timeout;
+            wait_ms = static_cast<int>(left);
+        }
         pollfd p{fd_of(read_), POLLIN, 0};
-        const int r = ::poll(&p, 1, timeout_ms);
+        const int r = ::poll(&p, 1, wait_ms);
         if (r < 0) {
             if (errno == EINTR) continue;
             return Read::Closed;

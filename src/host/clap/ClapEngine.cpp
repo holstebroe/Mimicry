@@ -273,7 +273,7 @@ public:
             Event e{};
             int key = n.key;
             double cents = n.cents;
-            if (n.on && !clap_dialect_ && std::fabs(cents) > 0) {  // no expressions: nearest key
+            if (!clap_dialect_ && std::fabs(cents) > 0) {  // no expressions: nearest key, for the off as well
                 key += static_cast<int>(std::lround(cents / 100.0));
                 cents = 0;
             }

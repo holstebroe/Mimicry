@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <thread>
+#include <unordered_map>
 
 #include "features/Preprocess.hpp"
 
@@ -65,6 +66,9 @@ std::vector<Evaluation> AudioObjective::evaluate(const std::vector<std::vector<d
     std::vector<std::vector<std::shared_ptr<const host::Audio>>> audio(n);
     std::vector<host::Job> jobs;
     std::vector<std::pair<std::size_t, std::string>> owners;  // candidate, cache key ("" = not cached)
+    // Snapping and clamping often repeat a vector within one batch: render it once (candidate, job).
+    std::unordered_map<std::string, std::size_t> pending;
+    std::vector<std::pair<std::size_t, std::size_t>> duplicates;
     for (std::size_t i = 0; i < n; ++i) {
         host::Job j = job_;
         j.coords = coords[i];
@@ -76,6 +80,11 @@ std::vector<Evaluation> AudioObjective::evaluate(const std::vector<std::vector<d
                 if (hit->audio) audio[i].push_back(hit->audio);
                 continue;
             }
+            if (const auto it = pending.find(key); it != pending.end()) {
+                duplicates.emplace_back(i, it->second);
+                continue;
+            }
+            pending.emplace(key, jobs.size());
             jobs.push_back(std::move(j));
             owners.emplace_back(i, std::move(key));
         } else {
@@ -100,6 +109,11 @@ std::vector<Evaluation> AudioObjective::evaluate(const std::vector<std::vector<d
                 if (severity(c.outcome) > severity(out[i].outcome)) out[i].outcome = c.outcome;
             }
             if (!key.empty()) cache_.insert(key, std::move(c));
+        }
+        for (const auto& [i, k] : duplicates) {
+            const std::size_t owner = owners[k].first;
+            out[i].outcome = out[owner].outcome;
+            audio[i] = audio[owner];
         }
     }
 

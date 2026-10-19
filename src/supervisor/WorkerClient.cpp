@@ -17,11 +17,12 @@ using host::HostError;
 
 namespace {
 
-// Nominal audio duration of a job: settle plus the note plan (the tail is open-ended).
+// Longest audio a job can render: settle, the note plan and the whole tail (the worker renders up to
+// tail_max_ms when the plugin does not go quiet).
 double plan_seconds(const host::Job& job) {
     double end_ms = 0;
     for (const auto& n : job.notes) end_ms = std::max({end_ms, n.on_ms, n.off_ms});
-    return (job.settle_ms + end_ms) / 1000.0;
+    return (job.settle_ms + end_ms + std::max(job.tail_max_ms, 0.0)) / 1000.0;
 }
 
 // First difference between two parameter tables (id, name, steps, flags), or "" when they agree.
@@ -200,7 +201,12 @@ std::uint64_t WorkerClient::blocks_done() const {
 expected<host::Audio, Outcome> WorkerClient::render(const host::Job& job) {
     auto r = render_once(job);
     if (r) {
-        if (options_.canary && (!canary_ || canary_->coords != job.coords)) canary_ = job;
+        if (options_.canary && (!canary_ || canary_->coords != job.coords)) {
+        // Only pass or fail matters for the canary, and the checks fire during the notes: a short tail keeps
+        // the check after every failure cheap.
+        canary_ = job;
+        canary_->tail_max_ms = std::min(canary_->tail_max_ms, options_.canary_tail_ms);
+    }
         return r;
     }
     // A crash or timeout already cost the process; any other failure may have poisoned the instance in a way

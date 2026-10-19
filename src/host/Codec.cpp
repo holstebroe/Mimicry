@@ -1,6 +1,7 @@
 #include "host/Codec.hpp"
 
 #include <format>
+#include <limits>
 
 namespace mimicry::host {
 
@@ -23,7 +24,9 @@ json::Value to_json(const Job& job) {
 expected<Job, std::string> job_from_json(const json::Value& v) {
     if (!v.is_object()) return unexpected(std::string("job: not an object"));
     Job job;
-    for (const auto& c : v["coords"].as_array()) job.coords.push_back(c.as_number());
+    // A non-finite coordinate was written as null: read it back as NaN so the renderer falls back to the
+    // parameter's default, exactly as it does in-process.
+    for (const auto& c : v["coords"].as_array()) job.coords.push_back(c.as_number(std::numeric_limits<double>::quiet_NaN()));
     for (const auto& n : v["notes"].as_array()) {
         Note note;
         note.key = static_cast<int>(n["key"].as_number(60));

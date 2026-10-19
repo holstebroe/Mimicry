@@ -50,7 +50,7 @@ string or the VST3 class id (TUID) plus name.
 | Start | `start_processing` | `setProcessing(true)` |
 | Parameters | `clap.params` (plain min/max, `value_to_text`) | `IEditController` params (normalised, `getParamStringByValue`, `ParameterInfo.units`), units via `IUnitInfo` |
 | Apply a value | `CLAP_EVENT_PARAM_VALUE` at time 0 | `ProcessData::inputParameterChanges` (`IParamValueQueue`, sample offset 0) **and** `setParamNormalized` on the controller, called on the main thread before block 0 (`Engine::apply_controller_values`) [A] |
-| Notes | `CLAP_EVENT_NOTE_ON/OFF`, velocity 0..1 | `Event::kNoteOnEvent/kNoteOffEvent` through `IEventList`, velocity 0..1, `noteId` |
+| Notes | `CLAP_EVENT_NOTE_ON/OFF`, velocity 0..1 | `Event::kNoteOnEvent/kNoteOffEvent` through `IEventList` (grown to the block's event count), velocity 0..1, `noteId` |
 | Fine tuning | note-expression TUNING | `NoteOnEvent.tuning` (cents): native |
 | Transport | `clap_event_transport` | `ProcessContext` (`kPlaying | kTempoValid | kTimeSigValid`, 120 BPM) |
 | State | `clap.state` save/load | `IComponent::getState/setState`, `IEditController::setComponentState`, controller `getState/setState` |
@@ -134,7 +134,9 @@ requirement), so the two formats render alike [A].
 Pitch: a note carries a key plus an optional **tuning offset in cents**: VST3 `tuning` natively, CLAP
 note-expression TUNING when supported, else MIDI pitch bend with a measured range (a calibration render
 at bend 0 and max gives the real bend range). If none exists, the nearest key is used and the residual
-(up to 50 cents) is reported [I]. Pitch is *measured* from the target and applied directly, not
+(up to 50 cents) is reported [I]; the note-off goes to the same rounded key, so the note is released [A].
+Events at the very end of the plan are delivered even with `tail_max` 0 (the render runs at least one
+frame past the last event) [A]. Pitch is *measured* from the target and applied directly, not
 searched [S: Acidus measures tuning explicitly].
 
 Implemented [A]: `opt/PitchCalibration` renders the note three times at the defaults: plain, +50 cents

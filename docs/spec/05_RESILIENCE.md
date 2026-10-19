@@ -9,7 +9,9 @@ here applies to CLAP and VST3 plugins alike; §9 lists the format-specific parts
 
 All rendering happens in `mimicry_worker` processes. The supervisor:
 - sends jobs over a pipe and receives audio through shared memory (no audio on the pipe). Implemented as one JSON object per line on inherited descriptors 3 (to the worker) and 4 (from it), and anonymous shared memory on descriptor 5 (unlinked at creation, so nothing leaks) that also carries state blobs [A];
-- applies a **per-job wall-clock timeout**, default `max(5 s, 20 × audio duration)` [D];
+- applies a **per-job wall-clock timeout**, default `max(5 s, 20 × audio duration)` [D], where the duration counts settle, the note plan and the
+  full `tail_max` the worker may render [A]; on POSIX and Windows alike it is one deadline for the whole
+  reply, not restarted by partial output [A];
 - on timeout or process exit, kills the worker (SIGKILL / `TerminateProcess`), reaps it, releases the
   shared memory, respawns, and scores the candidate as `Timeout` or `Crash`;
 - keeps handle, memory and zombie counts flat across thousands of crashes (test T7).
@@ -94,7 +96,8 @@ A filter that blew up can keep NaN state, and the next render of a valid preset 
   core (`Renderer`) resets the instance again (`Instance::reset`: the format's stop/deactivate/activate/
   start sequence, 02 §2), then `load_state` of the clean snapshot it took right after the first
   activation. If a check still fails on a known-good preset (the *canary*, rendered after every failure),
-  the worker restarts. The canary is the last job that rendered `Ok` on that worker [A]; it is not run
+  the worker restarts. The canary is the last job that rendered `Ok` on that worker, with its tail cut to 250 ms
+  (`WorkerOptions::canary_tail_ms`: only pass or fail matters, and the checks fire during the notes) [A]; it is not run
   after `Crash` or `Timeout`, which already replaced the process, nor before the first `Ok` render. The
   failed candidate keeps its own outcome; the canary only decides whether the process is trusted
   (`WorkerStats::canaries`, `canary_restarts`) [A].

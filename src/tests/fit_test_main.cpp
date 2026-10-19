@@ -298,6 +298,18 @@ int main(int argc, char** argv) {
     check(space.level_index() == long(ts::kLevel), "the level parameter is found");
     AudioObjective obj(render, job, *target, features::Weights::preset(target->analysis().kind), so, 3);
     check(obj.calibrate_offset(space.defaults()), "onset offset from the defaults");
+    {
+        // Identical vectors in one batch render once and share the outcome.
+        std::size_t rendered = 0;
+        RenderBatch counting = [&](const std::vector<host::Job>& jobs) {
+            rendered += jobs.size();
+            return render(jobs);
+        };
+        AudioObjective dup(counting, job, *target, features::Weights::preset(target->analysis().kind), so, 1);
+        const auto ev = dup.evaluate({truth, truth, space.defaults(), truth}, false);
+        check(rendered == 2 && ev.size() == 4 && ev[0].ok() && ev[1].ok() && ev[3].ok() && ev[0].loss == ev[3].loss,
+              "a batch renders each distinct vector once (" + std::to_string(rendered) + " renders)");
+    }
 
     PipelineOptions opt;
     opt.max_evals = 4000;

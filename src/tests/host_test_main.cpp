@@ -5,9 +5,11 @@
 #include <cmath>
 #include <complex>
 #include <cstdio>
+#include <limits>
 #include <string>
 
 #include "core/Fft.hpp"
+#include "host/Codec.hpp"
 #include "host/PluginHost.hpp"
 #include "tests/test_synth/TestSynthCore.hpp"
 
@@ -133,6 +135,19 @@ void test_rendering(Instance& inst) {
     const double f = dominant_hz(*a, 0.15, 0.55);
     check(std::fabs(f - 261.63) < 3.0, "C4 is 261.6 Hz: " + std::to_string(f));
     check(frames < 48000 * 3, "tail detection ends the render early");
+
+    // Without a tail the render still runs one frame past the last event, so the note-off is delivered.
+    auto no_tail = make_job(inst, 0, 500);
+    no_tail.tail_max_ms = 0;
+    auto c = inst.render(no_tail);
+    check(c && c->samples.size() / 2 == 24001, "tail 0: the note-off at the plan end is delivered");
+
+    // A non-finite coordinate survives the worker codec as NaN, which renders at the default (as in-process).
+    auto odd = make_job(inst);
+    odd.coords[index_of(inst, ts::kCutoff)] = std::numeric_limits<double>::infinity();
+    auto wire = json::parse(to_json(odd).dump());
+    auto decoded = wire ? job_from_json(*wire) : unexpected(std::string("parse"));
+    check(decoded && std::isnan(decoded->coords[index_of(inst, ts::kCutoff)]), "codec: a non-finite coordinate reads back as NaN");
 
     // +100 cents is one semitone up (note expression / tuning).
     auto up = make_job(inst, 0, 500, 60, 100.0);

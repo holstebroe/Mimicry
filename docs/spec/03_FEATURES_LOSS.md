@@ -99,7 +99,9 @@ Where the sections above leave a number open, `src/features` uses these [D] unle
   success threshold 1.5 x floor.
 - **Render cache.** Key = exact bytes of the parameter vector, note plan, rate, block size, settle,
   tail, peak limit, the silent flag and the pitch-bend range. Failed renders are cached (rule 6) except timeout and host
-  error, which may be transient.
+  error, which may be transient. Identical vectors within one batch render once and share the result [A].
+  A non-finite coordinate renders at the parameter's default, in-process and through the worker alike
+  (the job codec writes it as `null` and reads `null` back as NaN) [A].
 - **Cost.** Measured 17 ms (unpitched) to 27 ms (pitched) per 2 s candidate at 48 kHz on the build
   machine, against the 5 ms goal above; the three STFT families, the 40 ms `harmt` frames and the
   whole-note DFT dominate. `shape` now reads the 2048-point `msstft` power instead of a second identical
