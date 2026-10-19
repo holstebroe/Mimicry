@@ -45,10 +45,13 @@ endfunction()
 # --- Libraries ---------------------------------------------------------------------------------
 
 add_library(mimicry_core STATIC
+    src/core/Cma.cpp
     src/core/Fft.cpp
     src/core/Ipc.cpp
     src/core/Json.cpp
     src/core/Outcome.cpp
+    src/core/ParamSemantics.cpp
+    src/core/Sampling.cpp
     src/core/Wav.cpp
 )
 target_include_directories(mimicry_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
@@ -117,6 +120,21 @@ else()
     target_sources(mimicry_host PRIVATE src/host/clap/ClapEngineStub.cpp)
 endif()
 
+# Optimizer (docs/spec/04_OPTIMIZER.md): encoding, probe, pipeline, fingerprints, surrogate. Sees only the
+# format-agnostic host interface (PluginHost.hpp); renders go through a RenderBatch (a worker pool).
+add_library(mimicry_opt STATIC
+    src/opt/Embedding.cpp
+    src/opt/Fingerprint.cpp
+    src/opt/Objective.cpp
+    src/opt/Pipeline.cpp
+    src/opt/Probe.cpp
+    src/opt/Profile.cpp
+    src/opt/Space.cpp
+    src/opt/Surrogate.cpp
+)
+target_link_libraries(mimicry_opt PUBLIC mimicry_features mimicry_host mimicry_core)
+mimicry_warnings(mimicry_opt)
+
 # Supervisor side of the worker protocol. Includes only the Instance interface, never a plugin loader.
 add_library(mimicry_supervisor STATIC
     src/supervisor/WorkerClient.cpp
@@ -129,7 +147,7 @@ mimicry_warnings(mimicry_supervisor)
 
 # Supervisor / command line.
 add_executable(mimicry src/app/main.cpp)
-target_link_libraries(mimicry PRIVATE mimicry_supervisor mimicry_host mimicry_core)
+target_link_libraries(mimicry PRIVATE mimicry_opt mimicry_supervisor mimicry_host mimicry_core)
 mimicry_warnings(mimicry)
 
 # Render worker: the only process that loads plugins (docs/spec/05_RESILIENCE.md section 1).
@@ -190,6 +208,11 @@ if(MIMICRY_BUILD_TESTS)
     mimicry_warnings(mimicry_features_test)
     add_test(NAME features COMMAND mimicry_features_test)
 
+    add_executable(mimicry_opt_test src/tests/opt_test_main.cpp)
+    target_link_libraries(mimicry_opt_test PRIVATE mimicry_opt)
+    mimicry_warnings(mimicry_opt_test)
+    add_test(NAME opt COMMAND mimicry_opt_test)
+
     add_executable(mimicry_core_test src/tests/core_test_main.cpp)
     target_link_libraries(mimicry_core_test PRIVATE mimicry_core)
     mimicry_warnings(mimicry_core_test)
@@ -208,7 +231,16 @@ if(MIMICRY_BUILD_TESTS)
         target_include_directories(mimicry_worker_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
         mimicry_warnings(mimicry_worker_test)
         add_dependencies(mimicry_worker_test mimicry_test_synth mimicry_worker)
+        add_executable(mimicry_fit_test src/tests/fit_test_main.cpp)
+        target_link_libraries(mimicry_fit_test PRIVATE mimicry_opt mimicry_supervisor)
+        target_include_directories(mimicry_fit_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+        mimicry_warnings(mimicry_fit_test)
+        add_dependencies(mimicry_fit_test mimicry_test_synth mimicry_worker)
+        add_test(NAME fit_clap COMMAND mimicry_fit_test $<TARGET_FILE:mimicry_test_synth> $<TARGET_FILE:mimicry_worker>)
+
         if(MIMICRY_TEST_SYNTH_VST3)
+            add_dependencies(mimicry_fit_test mimicry_test_synth_vst3_build)
+            add_test(NAME fit_vst3 COMMAND mimicry_fit_test ${MIMICRY_TEST_SYNTH_VST3} $<TARGET_FILE:mimicry_worker>)
             add_dependencies(mimicry_host_test mimicry_test_synth_vst3_build)
             add_dependencies(mimicry_worker_test mimicry_test_synth_vst3_build)
             add_test(NAME host_vst3 COMMAND mimicry_host_test ${MIMICRY_TEST_SYNTH_VST3})

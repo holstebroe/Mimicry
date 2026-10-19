@@ -68,7 +68,7 @@ feature code is one place.
 
 ```
 src/core/        Types, Rng, Json (minimal), Wav, Fft, Cma (cma + sep-cma),
-                 Sampling (Sobol/LHS), ParamSemantics, Constraints
+                 Sampling (LHS), ParamSemantics, Constraints
 src/features/    Spectral (PowerStft), Pitch, Preprocess, Features, Loss (Target, Scorer, Weights)
 src/host/        PluginHost.hpp (interface), Renderer (job -> blocks, shared by backends),
                  clap/ (loader, HostApi, instance), vst3/ (module, component/controller,
@@ -76,7 +76,8 @@ src/host/        PluginHost.hpp (interface), Renderer (job -> blocks, shared by 
 src/worker/      worker_main, Ipc, SharedMem
 src/supervisor/  Pool, Scheduler, Watchdog
 src/targets/     WavTarget, PluginTarget, ImageTarget, ProbePlan
-src/opt/         RenderCache, Pipeline (stages), Probe (sensitivity), Diversity, Fingerprint
+src/opt/         RenderCache, Space (encoding), Objective (render + score), Embedding, Pipeline (stages,
+                 restarts, top-K diversity), Probe (sensitivity), Profile, Fingerprint, Surrogate
 src/output/      Report, AbWav, Ppm, PresetExport (state, params.json, .vstpreset)
 src/app/         main + commands
 src/gui/         (later) Graphics/Font/ModernDraw/window glue taken from Acidus
@@ -85,7 +86,7 @@ tools/           analysis helpers
 docs/            plan, spec/
 ```
 
-CMake targets: `mimicry_core`, `mimicry_host` (static libs), `mimicry_worker`, `mimicry` (executables),
+CMake targets: `mimicry_core`, `mimicry_features`, `mimicry_host`, `mimicry_opt`, `mimicry_supervisor` (static libs), `mimicry_worker`, `mimicry` (executables),
 `mimicry_test_synth` (CLAP module with planted hazards) and `mimicry_test_synth_vst3` (the same code
 wrapped by clap-wrapper, as the other plugins), test executables registered with `ctest`. Release
 builds use IPO and size-optimise glue as in Acidus [S].

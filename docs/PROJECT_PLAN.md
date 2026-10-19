@@ -32,7 +32,9 @@ git submodule update --init                       # clap
 cmake -B build -DCMAKE_BUILD_TYPE=Release         # VST3 SDK fetched, or -DVST3_SDK_ROOT=... 
 cmake --build build -j
 ctest --test-dir build
-build/mimicry list path/to/plugin.clap            # or plugin.vst3 (target; commands are stubs today)
+build/mimicry list path/to/plugin.clap            # or plugin.vst3: parameters, semantics, search roles
+build/mimicry probe path/to/plugin.clap           # writes profiles/<format>-<uid>-<hash>.json
+build/mimicry fingerprint path/to/plugin.clap     # optional: random-preset database for S1 seeding
 build/mimicry fit --plugin path/to/plugin.vst3 --wav target.wav --minutes 20
 ```
 
@@ -52,7 +54,7 @@ build/mimicry fit --plugin path/to/plugin.vst3 --wav target.wav --minutes 20
 | 1.2 | CLAP backend: loader, host API, thread-check, instance lifecycle | ✅ `host/clap/ClapEngine.cpp` (params, state, tail, latency, note expression tuning, log, thread-check); Windows/macOS loader paths unverified |
 | 1.3 | Parameter enumeration with units from value text (both backends) | ✅ `ParamUtil`; texts at 0/25/50/75/100 %, units, log decision, program-change heuristic |
 | 1.4 | Shared render core: events, settle, notes, tail, output checks | ✅ `host/Renderer.cpp` (reset per render, pinned bypass/program, checks of spec 05 section 2, restart handling) |
-| 1.5 | Worker process, shared-memory audio, supervisor pool, watchdog | 🟡 POSIX done and tested (`WorkerClient`, `WorkerPool`, recycling, T7 with 300 crashes + hangs); Windows returns an error |
+| 1.5 | Worker process, shared-memory audio, supervisor pool, watchdog | 🟡 POSIX done and tested (`WorkerClient`, `WorkerPool`, recycling, T7 with 300 crashes + hangs); pool workers now live on long-lived threads (a respawn from a short-lived thread was killed by `PR_SET_PDEATHSIG`, fixed in WP3); Windows returns an error |
 | 1.6 | `mimicry_test_synth` (CLAP) and `mimicry_test_synth_vst3` (clap-wrapper) with planted hazards | ✅ both; the VST3 build is a separate project (`src/tests/test_synth_vst3`) via ExternalProject. Hazards: NaN, null deref (A>0.8 && B>0.9), hang, poison, random LFO phase, program, restart. Open: T16-style checks for the restart/program parameters |
 | 1.7 | **VST3 backend**: SDK hosting module loading, component + controller + connection, host classes, `ProcessData`, parameter changes, event list, offline setup | ✅ `host/vst3/Vst3Engine.cpp` on the SDK hosting classes; T13 equivalence passes against the clap-wrapper build. Real third-party VST3 plugins not yet tried (OQ5) |
 | 1.8 | VST3 state (component + controller), program lists, program-change pinning, restart requests, tail/latency | 🟡 state, pinning (flag or name heuristic), restart/rescan, tail, latency done; program lists (`IUnitInfo`) open |
@@ -65,25 +67,25 @@ build/mimicry fit --plugin path/to/plugin.vst3 --wav target.wav --minutes 20
 | 2.2 | f0 estimation and pitch application (VST3 tuning cents / CLAP note expression / bend calibration) | 🟡 `Pitch`: comb search + LS refinement, key/cents, `--note` parsing; `Target` turns it into the note key and cents. Tuning cents and nearest-key fallback were already in the backends (1.2, 1.7); MIDI pitch-bend calibration and the residual report are open |
 | 2.3 | `harm`, `inter`, `harmt` for pitched targets (port from Acidus) | ✅ written from the spec definitions (Acidus source is not in this repository, so the evidence tags stay [S] only where the spec says so); one-sided `inter` against the target's own gap level |
 | 2.4 | `shape` features, weight presets by sample kind | ✅ `shape` (centroid, flatness, rolloff, flux, MFCC 1-13), `Weights::preset`, `--w-<feature>` override (`Weights::set`), kind classifier with `--kind` override. Thresholds are [D] guesses (OQ3) |
-| 2.5 | Repeatability floor, render cache | 🟡 `repeatability_floor_db`, `repeat_policy` (renders 1-4, success threshold 1.5x), `opt::RenderCache` (exact key, LRU, failures cached except timeout/host error). Open: pinning seed/random parameters, wiring into the optimizer (WP3) |
+| 2.5 | Repeatability floor, render cache | ✅ `repeatability_floor_db`, `repeat_policy` (renders 1-4, success threshold 1.5x), `opt::RenderCache` (exact key, LRU, failures cached except timeout/host error); wired into `AudioObjective` (cache + renders per candidate from the profile floor); seed/random parameters pinned by name in `Space` |
 
 ### WP3 — Optimizer (spec 04)
 | ID | Issue | Status |
 | --- | --- | --- |
-| 3.1 | CMA-ES port from Acidus with restarts, Jacobi eigensolver; sep-CMA-ES | ⬜ |
-| 3.2 | Unit-box encoding: CLAP plain values with log/linear decode, VST3 native normalised coordinate (02 §1), stepped handling, boundary penalty | ⬜ |
-| 3.3 | Unsupervised pipeline (S1, S5, S7), time cap, patience | ⬜ |
-| 3.4 | Semantics classifier and staged hybrid pipeline | ⬜ |
-| 3.5 | Sensitivity probe, dead-parameter detection, pair probes, plugin profile (per format) | ⬜ |
-| 3.6 | Categorical outer loop; R restarts; top-K diversity | ⬜ |
-| 3.7 | Fingerprint database and nearest-neighbour seeding | ⬜ |
-| 3.8 | Surrogate / Bayesian optimisation for slow plugins | ⬜ |
+| 3.1 | CMA-ES port from Acidus with restarts, Jacobi eigensolver; sep-CMA-ES | ✅ `core/Cma` (full + separable, restarts from the best with doubled population); T5 in `mimicry_opt_test` (sphere, Rosenbrock, Rastrigin with restarts, sep-CMA-ES ellipsoid 100D / sphere 200D). Written from the spec: the Acidus source is not in this repository |
+| 3.2 | Unit-box encoding: CLAP plain values with log/linear decode, VST3 native normalised coordinate (02 §1), stepped handling, boundary penalty | ✅ `opt/Space`: roles (free / stepped / categorical / fixed), safe box clip + boundary penalty, grid snap, probe-driven log warp for both formats (04 §9, OQ9), pitch pinning when S0 applies pitch |
+| 3.3 | Unsupervised pipeline (S1, S5, S7), time cap, patience | ✅ `opt/Pipeline` + `opt/Objective` (`AudioObjective`: batch render through a `RenderBatch`, cache, parallel scoring); `mimicry fit` drives it. Test synth via worker pool recovers a preset in both formats (`fit_clap`, `fit_vst3`: < 0.5 dB at 4000 evaluations) |
+| 3.4 | Semantics classifier and staged hybrid pipeline | ✅ `core/ParamSemantics` (token priors + confidence, output level, seed, pitch names); S2-S4 by group; hybrid takes the probe's class; interacting pairs share a stage; categorical sweep after S1 and each group stage |
+| 3.5 | Sensitivity probe, dead-parameter detection, pair probes, plugin profile (per format) | ✅ `opt/Probe` + `opt/Profile` (`mimicry probe`): classes, response shape, safe box (per side of the default, narrowed by a failure next to it), 2x2 interaction; profile keyed on format + uid + version hash, entries on id + name. Thresholds are [D] (OQ3). Settle-time probe (05 §6) open |
+| 3.6 | Categorical outer loop; R restarts; top-K diversity | ✅ S6 (importance, enumeration of <= 3 x 4 values, inner S5), R independent runs, top-K by parameter and embedding distance (`opt/Embedding`) |
+| 3.7 | Fingerprint database and nearest-neighbour seeding | ✅ `opt/Fingerprint` (`mimicry fingerprint`, binary file, exact parameter-table match); `fit` seeds S1 with the 8 nearest neighbours, conformed to the fit's space (fixed parameters at default) |
+| 3.8 | Surrogate / Bayesian optimisation for slow plugins | 🟡 `opt/Surrogate`: GP pre-screening of 3λ CMA-ES samples (auto above 1 s per candidate). Not yet measured on a slow real plugin |
 
 ### WP4 — Resilience (spec 05)
 | ID | Issue | Status |
 | --- | --- | --- |
-| 4.1 | Ranking of invalid candidates, resample, sigma adaptation | ⬜ |
-| 4.2 | Safe box from probe | ⬜ |
+| 4.1 | Ranking of invalid candidates, resample, sigma adaptation | 🟡 ranking (severity, then distance to the best valid point) and sigma shrink + recentre in `Pipeline` (WP3); resampling against learned constraints needs 4.3 |
+| 4.2 | Safe box from probe | 🟡 probe shortens each range to the last good probe value; `Space` clips to it. Joint (multi-parameter) safety is 4.3 |
 | 4.3 | Failure bisection and constraint store | ⬜ |
 | 4.4 | State reset, canary, instance recycling (both formats) | ⬜ |
 | 4.5 | Failure reports and `mimicry replay` | ⬜ |
@@ -92,7 +94,7 @@ build/mimicry fit --plugin path/to/plugin.vst3 --wav target.wav --minutes 20
 ### WP5 — Targets (spec 06)
 | ID | Issue | Status |
 | --- | --- | --- |
-| 5.1 | WAV target analysis and `mimicry fit` | ⬜ |
+| 5.1 | WAV target analysis and `mimicry fit` | 🟡 `mimicry fit` runs end to end (analysis, pitch to the note, profile, fingerprints, pipeline, run directory). Open: `--midi`, `--gate` defaults from the envelope, `--velocity` |
 | 5.2 | Probe plans, source rendering and cache | ⬜ |
 | 5.3 | `mimicry transfer` for one preset, then the bank loop and report, in any format combination | ⬜ |
 | 5.4 | Learned mapping `knob_map.json` (keyed by source and target format + uid) | ⬜ |
@@ -104,9 +106,9 @@ build/mimicry fit --plugin path/to/plugin.vst3 --wav target.wav --minutes 20
 ### WP6 — Output and tests (spec 07)
 | ID | Issue | Status |
 | --- | --- | --- |
-| 6.1 | `best.state`, `best.params.json`, `match.wav`, `ab.wav`, `report.md`, `diff.ppm` | ⬜ |
+| 6.1 | `best.state`, `best.params.json`, `match.wav`, `ab.wav`, `report.md`, `diff.ppm` | 🟡 `fit` writes `best.params.json`, `best.state`, `match.wav`, `ab.wav`, `result.json`, `top-k/`; `report.md`, `diff.ppm` and `.vstpreset` open |
 | 6.2 | Holdout and `mimicry eval` | ⬜ |
-| 6.3 | Tests T1-T12 | 🟡 smoke, core, host (T1 T2 T3 T9 partly), worker (T1 via worker, T7, T9), T13 equivalence |
+| 6.3 | Tests T1-T12 | 🟡 smoke, core, host (T1 T2 T3 T9 partly), worker (T1 via worker, T7, T9), T13 equivalence, T5 (`opt`), optimizer against the test synth in both formats (`fit_clap`, `fit_vst3`, a small T6) |
 | 6.4 | `mimicry rehearse` round trip | ⬜ |
 | 6.5 | `.vstpreset` writer and round-trip test (T14) | ⬜ |
 | 6.6 | Backend equivalence, cross-format transfer, VST3 specifics (T13, T15, T16) | 🟡 T13 done; T15, T16 open |
@@ -133,14 +135,15 @@ built and tested against both formats from the start.
 | ID | Question | Status |
 | --- | --- | --- |
 | OQ1 | Dependencies: own PNG/JPEG decoder for image targets, or allow a public-domain single header (stb_image)? Own JSON stays the default | 🔬 |
-| OQ2 | Performance target on the real machine (evals/s for Acidus, Tannhauser); measure before tuning weights | 🔬 |
+| OQ2 | Performance target on the real machine (evals/s for Acidus, Tannhauser); measure before tuning weights. First number: test synth, 1 s note, 3 workers on 4 cores: ~90 evaluations/s (features dominate) | 🔬 |
 | OQ3 | Default weights and probe plan are guesses; tune on real samples and on Acidus/Tannhauser presets | 🔬 |
 | OQ4 | Resolved: `.vstpreset` export is in scope (WP5.8, WP6.5). Open detail: wrapper-state round trip across clap-wrapper versions | 🔬 |
 | OQ5 | Plugins that need a message loop, window or licence dialog to initialise (mostly third-party VST3): how far does the minimal main-thread pump get us? Measure on real plugins (WP1.9, WP4.6) | 🔬 |
 | OQ6 | Whether `ImageFeatures` is extracted into a shared header with the image-seeded synth | 🔬 |
 | OQ7 | Resolved for GCC 13: SDK v3.8.0 is MIT licensed and its hosting sources build under C++20. Open: MSVC and AppleClang (CI) | 🔬 |
 | OQ8 | VST3 offline processing mode vs realtime: how many real plugins sound different, and should the fit offer `--realtime-mode`? | 🔬 |
-| OQ9 | VST3 coordinate: native normalised is the default (02 §1); does the probe show plugins with tapers bad enough to need a re-mapped coordinate? | 🔬 |
+| OQ9 | VST3 coordinate: native normalised is the default (02 §1); does the probe show plugins with tapers bad enough to need a re-mapped coordinate? Yes for clap-wrapper builds: the test synth's 20 Hz-20 kHz cutoff is linear in its VST3 normalised value, and without a warp the VST3 fit stalled at 2-4 dB. The optimizer now warps any parameter whose probe response is log (04 §9). Open: how many third-party VST3 plugins need it | 🔬 |
+| OQ11 | `estimate_f0` puts a pure sine at a subharmonic (220 Hz read as 31.4 Hz = f/7). Harmless for the probe (harmonic jumps are ignored) but it would mis-set `harm`/`env` for a sine target (WP2.2) | 🔬 |
 | OQ10 | Resolved: baseline lowered to C++20 with an `expected` shim (see decision log); Clang 18 + libstdc++ 13 no longer blocked. Open detail: verify on MSVC and AppleClang once CI has run | 🔬 |
 
 ## Decision log
@@ -155,6 +158,8 @@ built and tested against both formats from the start.
 
 ## Progress log
 
+- 2026-10-19: WP3 review fixes: seeds (fingerprint neighbours, warm starts) are conformed to the space, so `--fix`, pinned pitch and grid steps hold; probe safe box narrowed when the value next to the default fails; S5 restarts never reuse a start; the surrogate trains only on points that agree with the run's held parameters; top-K embeddings come from one cached render (`Objective::embed`) and failures are counted; `fit` asks `value_text` through `WorkerPool::value_text` on a pool thread; CMA-ES restart policy shared (`cma_restart_options`, `cma_should_restart`), one per-plugin file naming rule (`plugin_file_path`), one grid snap (`snap_to_grid`), `Space::sample_box` for S1 and fingerprints. New unit checks in `opt`. All 11 ctest tests pass.
+- 2026-10-19: WP3 optimizer: `core/Cma` (CMA-ES, sep-CMA-ES, Jacobi), `core/Sampling` (LHS), `core/ParamSemantics`; library `mimicry_opt` with `Space`, `Objective`, `Embedding`, `Probe`, `Profile`, `Pipeline` (S1-S7, R restarts, top-K, categorical sweep and outer loop), `Fingerprint`, `Surrogate`. Commands `list`, `probe`, `fingerprint`, `fit` implemented. Found and fixed a WP1.5 bug: pool workers respawned on short-lived threads were killed by `PR_SET_PDEATHSIG` (regression check in `worker_*`). Two spec decisions from measurements: pitch-only parameters are pinned when S0 applies pitch (a detune basin is ~20 cents wide and flat elsewhere), and a probe-measured log response is warped in either format (OQ9). Tests: `opt` (T5 and units), `fit_clap`/`fit_vst3` (probe classes, safe box from the NaN and hang hazards, profile round trip, preset recovered < 1 dB, fingerprint neighbours). All 11 ctest tests pass on Linux/GCC 13 with the clap submodule and VST3 SDK.
 - 2026-10-19: WP2 features and loss in `src/features` (library `mimicry_features`, test `mimicry_features_test`): pre-processing, f0, `msstft`/`env`/`bands`/`harm`/`inter`/`harmt`/`shape`, noise-floor clamp, closed-form gain, weights and kind classifier, onset offset, repeatability policy, `opt::RenderCache`. `Fft` inner loop rewritten without `std::complex` multiplication (about 3x faster). Open: pitch-bend calibration (2.2), seed pinning (2.5), feature cost still ~27 ms per 2 s candidate (OQ2). The CLAP/VST3 host tests are not built in this checkout (clap submodule absent), so only smoke, core and features ran.
 
 - 2026-10-17: Specification written (this document set). No code yet.

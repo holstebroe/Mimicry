@@ -28,7 +28,8 @@ readonly, bypass, program-change, automatable), coord }`. Both formats use 32-bi
   already log-map frequencies and times [D].
 - **CLAP**: the *plain* value mapped linear or log by 04 §1.
 The probe (04 §3) checks how uniform each parameter's effect is in `u` either way, so a poor taper is
-detected, not assumed. 04 §1's log/linear decode applies to CLAP plain values only.
+detected, not assumed. 04 §1's log/linear decode applies to CLAP plain values; on top of either format the
+optimizer warps a parameter whose measured response is log (04 §9) [D].
 
 Format is chosen by extension (`.clap`, `.vst3`); `--format` overrides. `plugin_uid` is the CLAP id
 string or the VST3 class id (TUID) plus name.

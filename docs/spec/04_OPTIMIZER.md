@@ -9,7 +9,8 @@ Every free parameter is `u ∈ [0,1]`, decoded per parameter [S: Acidus unit box
 
 - linear or **log** (log when the value text has Hz/ms/s units, or max/min >= 20 with min > 0, or the
   probe says the effect is uniform in log) [D]. This decode applies to CLAP plain values; VST3
-  parameters use the plugin's native normalised coordinate (02 §1);
+  parameters use the plugin's native normalised coordinate (02 §1), re-mapped by the optimizer only where
+  the probe measures a log response (§9);
 - stepped parameters are carried continuous in the strategy and rounded at decode;
 - enums and booleans are *categorical*: handled by outer enumeration (§5), not by CMA-ES;
 - decode clips to [0,1] and the loss adds a quadratic penalty for the clip distance, so the strategy
@@ -24,7 +25,8 @@ lpf/hpf; env: attack, decay, sustain, release, adsr, env amt; lfo: lfo, rate, de
 delay, chorus, mix, wet, feedback, size; amp: volume, gain, level, pan.
 
 Names are **priors only**. The probe (§3) measures what each parameter does, and a measured signature
-overrides a name guess. Names help most for ordering stages and for the first sigma.
+overrides a name guess. Names help most for ordering stages and for the first sigma. Pitch-only
+parameters are pinned when S0 applies the target's pitch (§9).
 
 ## 3. Sensitivity probe (`mimicry probe`)
 
@@ -99,3 +101,62 @@ current loss scale [D]. It prefers the simpler of two equally good presets and k
 After >= 50 solved (source params → target params) pairs, fit per target parameter a small monotone
 model from the most correlated source parameter(s). Used as the warm start for the next presets and
 exportable as `knob_map.json` (the cutoff law between two synths, in effect).
+
+## 9. Implementation details (WP3)
+
+Where the sections above leave a number or a rule open, `src/core` (`Cma`, `Sampling`, `ParamSemantics`)
+and `src/opt` use these [D] unless noted:
+
+- **Roles.** A parameter is *categorical* when it has 2 values, or 3-16 values whose value texts contain no
+  digit and no units; other stepped parameters are carried continuous and rounded to their grid at decode.
+  Fixed (never searched): read-only, bypass, program change, hidden, not automatable, single-valued,
+  seed/random by name (spec 03 §6), dead by the probe, `--fix`, everything outside `--only`.
+- **Pitch.** S0 applies the target's measured key + cents to the notes, so a fit of a pitched target pins
+  parameters that only shift pitch: the probe's `pitch` class, or without a profile a name with tune,
+  tuning, fine or pitch (not detune, often a unison spread). A pitch basin is a few cents wide and flat
+  around it, which no spectral loss can search.
+- **Warp.** A parameter whose probe response is `log` (more than half of the change in the first quarter of
+  u) is searched in `x` with `u = (100^x − 1) / 99`, unless the backend already decodes it in log. This
+  applies to **both** formats: the clap-wrapper build of the test synth exposes its 20 Hz-20 kHz cutoff
+  linearly in the VST3 normalised value, which the probe flags (plan OQ9).
+- **Boundary penalty.** 100 dB per unit² of clip distance in `x`, added to the CMA-ES fitness only (the
+  rendered point is the clipped one).
+- **Invalid candidates** rank after all valid ones as `10^6 + 10^4 · severity + 100 · distance` to the run's
+  best valid point (05 §3); more than half invalid shrinks sigma by 0.7 and recentres on the best valid point.
+- **Budget.** S1 renders `min(N, budget / 4)` LHS points in the safe box (categoricals uniform), after the
+  defaults and any given seeds (each conformed to the space first: fixed parameters at their defaults,
+  the others clipped to the safe box and snapped to their grid [A]); S2-S4 get 12 % each of what is left (time and evaluations), S5 75 % of what
+  is left, S6 inner runs 35 % each, S7 the rest. S5 run 1 polishes the best point with half of S5; runs
+  2..R start from the next S1 seeds not yet used as a start or near a run's best (sigma 0.3) and split the
+  other half. Patience applies per
+  CMA-ES run, the time cap and evaluation budget globally.
+- **Categorical sweep.** S1 and each group stage end with a one-at-a-time sweep of every categorical
+  parameter on the best point (two passes at most), so S5 does not polish the wrong waveform. S6 then ranks
+  categoricals with at most 4 values by the loss spread they cause, enumerates the top 3, and runs an inner
+  S5 for the two best other combinations within 3 dB of the best.
+- **S7** tries ±0.04 and then ±0.01 (one grid step for stepped parameters) on every active parameter and
+  keeps the combination of the improving moves if it beats the best single move. The holdout check is WP6.2.
+- **Interaction.** A pair the probe finds non-separable (interaction RMS above `2 · floor + 0.5`) with its
+  parameters in different stages moves the later one into the earlier one's group.
+- **Top-K.** The best of each CMA-ES run, S6 and S7 (up to 24) are re-scored with embeddings (one render
+  each, cached; never the repeats of a noisy plugin; a failure is counted in the outcomes [A]); a candidate joins the top K unless it is within 0.1 RMS in `u` of one already chosen or within
+  0.5 embedding units of it (it sounds the same).
+- **Embedding** (77 floats, dB-like): 32 log-mel band means relative to their mean and their standard
+  deviations over frames within 60 dB of the loudest, centroid (6 · log2 Hz) and flatness mean and standard
+  deviation, the envelope at 10-1600 ms after the onset relative to the peak, and the level (left out of
+  distances).
+- **Probe.** Descriptors per render: centroid, f0 (confidence >= 0.5), peak to −20 dB decay, onset to
+  −60 dB tail, flatness, level, embedding. Unit scores: 20 cents, 0.15 octave, 0.25 in log2 time, 1.5 dB;
+  f0 changes by a small-integer ratio are estimator jumps, not pitch. Dead: embedding change at most
+  `max(3 · floor, 0.15)`, level within 0.5 dB, pitch within 5 cents, and nothing failed. Otherwise the
+  largest score >= 1 wins (`fx` when the tail grows twice as much as the decay and flatness moves 1.5 dB),
+  else `spectrum`. The safe box is the run of good probe values on each side of the default; a
+  failure next to the default narrows that side to the default itself [A]. Pairs: the 10
+  strongest parameters, corners at 0.25 / 0.75.
+- **Surrogate.** On when a candidate costs more than 1 s (or forced): a GP (RBF, length scale = median
+  pairwise distance, standardised targets) on the last 150 valid points of the free subset that agree with
+  the run on every searched parameter it holds [A] ranks 3λ
+  samples by `mean − sd`, and the best λ are rendered.
+- **Fingerprint file:** `profiles/<format>-<uid>-<version hash>.fingerprint`, magic `MIMFPDB1`, a JSON header
+  line (ids, names, counts), then float32 rows of coordinates and embedding. A database is used only for
+  the exact parameter table (ids and names) it was built for; S1 adds the 8 nearest neighbours.
