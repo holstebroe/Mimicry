@@ -13,6 +13,9 @@ All rendering happens in `mimicry_worker` processes. The supervisor:
 - on timeout or process exit, kills the worker (SIGKILL / `TerminateProcess`), reaps it, releases the
   shared memory, respawns, and scores the candidate as `Timeout` or `Crash`;
 - keeps handle, memory and zombie counts flat across thousands of crashes (test T7).
+- spawns and respawns each pool worker from one long-lived thread per worker: on Linux the worker's
+  parent-death signal (`PR_SET_PDEATHSIG`) belongs to the spawning *thread*, so a worker respawned from a
+  short-lived thread would be killed when that thread ends and the next candidate scored as `Crash` [A].
 
 `--no-isolation` renders in-process for debugging a plugin under a debugger; `mimicry replay` uses it.
 

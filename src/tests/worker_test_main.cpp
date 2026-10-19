@@ -174,6 +174,13 @@ int main(int argc, char** argv) {
             }
             check(order_ok, "pool results are in job order and equal in-process renders");
             check((*pool)->total_stats().crashes == 4, "pool crash count");
+            // Workers respawned after the crashes keep running into the next batch (Linux: the parent-death
+            // signal belongs to the spawning thread, so respawns must happen on the pool's long-lived threads).
+            std::vector<host::Job> valid(12, job);
+            const auto again = (*pool)->render_all(valid);
+            bool all_ok = true;
+            for (const auto& r : again) all_ok = all_ok && r.has_value();
+            check(all_ok && (*pool)->total_stats().crashes == 4, "respawned pool workers survive the batch that respawned them");
         }
     }
 

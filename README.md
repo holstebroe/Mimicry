@@ -3,9 +3,10 @@
 Offline tool that hosts a CLAP or VST3 plugin and uses a non-linear optimizer to find the preset that
 matches a WAV, an image, or another plugin's preset. C++20, CMake, no frameworks.
 
-**Status: skeleton.** The specification and plan are written (`docs/`), the build runs, and the
-command line prints its interface. Hosting, rendering and optimisation are not implemented yet: see
-`docs/PROJECT_PLAN.md` for the work packages and their order.
+**Status: first working fit.** CLAP and VST3 hosting in isolated worker processes, the feature loss and
+the optimizer (CMA-ES pipeline, sensitivity probe, fingerprints) are in place: `mimicry list`, `probe`,
+`fingerprint` and `fit` work. Plugin-to-plugin transfer, image targets, reports and preset export are
+next: see `docs/PROJECT_PLAN.md` for the work packages and their order.
 
 ## What it will do
 
@@ -38,15 +39,16 @@ taken from `-DVST3_SDK_ROOT=...`) once the VST3 backend lands (WP1.7).
 ## Layout
 
 ```
-src/core/        types and utilities (outcomes, later: Wav, Fft, Features, Cma, ...)
-src/host/        PluginHost interface; clap/ and vst3/ backends (planned)
+src/core/        utilities: Json, Wav, Fft, Rng, Ipc, Cma (CMA-ES), Sampling, ParamSemantics
+src/features/    pitch, features and loss
+src/host/        PluginHost interface, shared render core; clap/ and vst3/ backends
 src/worker/      mimicry_worker, the only process that loads plugins
-src/supervisor/  worker pool, scheduler, watchdog (planned)
+src/supervisor/  worker client and pool with watchdog
 src/targets/     WAV, plugin and image targets (planned)
-src/opt/         optimizer pipeline, probes, fingerprint (planned)
+src/opt/         encoding, objective, probe and profile, pipeline, fingerprints, surrogate
 src/output/      reports, A/B audio, preset export (planned)
 src/app/         the mimicry command line
-src/tests/       tests and the test synth (a stub for now)
+src/tests/       tests and the test synth (CLAP, and VST3 through clap-wrapper)
 docs/            PROJECT_PLAN.md and spec/
 ```
 

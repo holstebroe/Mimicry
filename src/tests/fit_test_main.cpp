@@ -1,0 +1,219 @@
+// Optimizer against a real plugin (WP3): the probe classifies mimicry_test_synth's parameters and finds its
+// safe box, the profile round-trips, the pipeline recovers a preset of the plugin's own (a small T6) and the
+// fingerprint database seeds from the right neighbourhood. Renders go through a worker pool, as in
+// production (CLAUDE.md rule 4). Usage: mimicry_fit_test <plugin> <mimicry_worker>.
+
+#include <cmath>
+#include <cstdlib>
+#include <cstdio>
+#include <filesystem>
+#include <format>
+#include <string>
+
+#include "features/Loss.hpp"
+#include "host/ParamUtil.hpp"
+#include "opt/Fingerprint.hpp"
+#include "opt/Objective.hpp"
+#include "opt/Pipeline.hpp"
+#include "opt/Probe.hpp"
+#include "opt/Space.hpp"
+#include "supervisor/WorkerPool.hpp"
+#include "tests/test_synth/TestSynthCore.hpp"
+
+namespace {
+
+using namespace mimicry;
+using namespace mimicry::opt;
+namespace ts = mimicry::testsynth;
+
+int failures = 0;
+
+void check(bool ok, const std::string& what) {
+    if (!ok) {
+        std::fprintf(stderr, "FAIL: %s\n", what.c_str());
+        ++failures;
+    }
+}
+
+const ParamProfile* entry(const Profile& p, ts::ParamId id) {
+    for (const auto& e : p.params)
+        if (e.id == id) return &e;
+    return nullptr;
+}
+
+}  // namespace
+
+int main(int argc, char** argv) {
+    if (argc < 3) {
+        std::fputs("usage: mimicry_fit_test <plugin> <mimicry_worker>\n", stderr);
+        return 2;
+    }
+#if defined(_WIN32)
+    std::puts("mimicry_fit_test: skipped (process isolation not implemented on Windows yet)");
+    return 0;
+#else
+    supervisor::WorkerOptions wo;
+    wo.worker_exe = argv[2];
+    wo.min_timeout_s = 1.0;
+    wo.timeout_factor = 0;
+    wo.shm_bytes = 16u << 20;
+    auto pool = supervisor::WorkerPool::open(argv[1], {}, 3, wo);
+    check(pool.has_value(), "open worker pool");
+    if (!pool) return 1;
+    auto& p0 = (*pool)->client(0);
+    const auto info = p0.info();
+    const auto params = p0.parameters();
+    RenderBatch render = [&](const std::vector<host::Job>& jobs) { return (*pool)->render_all(jobs); };
+
+    host::Job job;
+    job.notes.push_back({57, 0, 0.8f, 0, 400});
+    job.tail_max_ms = 1200;
+
+    // --- Probe (spec 04 section 3) ---
+    ProbeOptions po;
+    po.job = job;
+    po.pair_params = 6;
+    auto prof = probe(render, info, params, po);
+    check(prof.has_value(), "probe: " + (prof ? std::string() : prof.error()));
+    if (!prof) return 1;
+    auto cls = [&](ts::ParamId id) { return entry(*prof, id) ? entry(*prof, id)->measured : ProbeClass::Spectrum; };
+    std::string table;
+    for (const auto& e : prof->params)
+        table += std::format("  {:<14} {:<10} effect {:7.2f} {} safe [{:.2f}, {:.2f}]\n", e.name, to_string(e.measured),
+                             e.effect, e.response == Response::Log ? "log" : e.response == Response::Exp ? "exp" : "lin",
+                             e.safe_lo, e.safe_hi);
+    std::printf("%s probe (floor %.3f dB, %.2f ms/render):\n%s", std::string(host::to_string(info.format)).c_str(),
+                prof->floor_db, prof->render_ms, table.c_str());
+    // At the defaults the oscillator is a sine, so the cutoff changes the level, not the brightness: the probe
+    // reports what a parameter does at the defaults (spec 04 section 3).
+    check(cls(ts::kCutoff) == ProbeClass::Level || cls(ts::kCutoff) == ProbeClass::Brightness, "probe: cutoff is level or brightness");
+    check(cls(ts::kWave) != ProbeClass::Dead && cls(ts::kWave) != ProbeClass::Pitch, "probe: wave changes the spectrum, not the pitch");
+    check(cls(ts::kDetune) == ProbeClass::Pitch, "probe: detune is pitch");
+    check(cls(ts::kLevel) == ProbeClass::Level, "probe: level is level");
+    check(cls(ts::kRelease) == ProbeClass::Time || cls(ts::kDecay) == ProbeClass::Time, "probe: an envelope time is time");
+    check(cls(ts::kLfoRate) == ProbeClass::Dead, "probe: LFO rate is dead at LFO depth 0");
+    check(cls(ts::kHazA) == ProbeClass::Dead && cls(ts::kHazB) == ProbeClass::Dead, "probe: single hazard switches are dead");
+    check(!entry(*prof, ts::kHidden) && !entry(*prof, ts::kMeter) && !entry(*prof, ts::kProgram) && !entry(*prof, ts::kBypass),
+          "probe: hidden, read-only, program and bypass are not probed");
+    const auto* nan = entry(*prof, ts::kHazNan);
+    check(nan && nan->outcomes.back() == Outcome::NonFinite && nan->safe_hi == 0.75 && nan->safe_lo == 0,
+          "probe: the NaN hazard shortens the safe box to the last good value");
+    const auto* hang = entry(*prof, ts::kHazHang);
+    check(hang && hang->outcomes.back() == Outcome::Timeout && hang->safe_hi == 0.75, "probe: the hang hazard is a timeout");
+    check(!prof->pairs.empty(), "probe: pair interactions measured");
+
+    const auto dir = std::filesystem::temp_directory_path() / ("mimicry_fit_test_" + std::string(host::to_string(info.format)));
+    std::filesystem::create_directories(dir);
+    const auto ppath = Profile::default_path(dir, info);
+    check(prof->save(ppath).has_value(), "profile save");
+    auto loaded = Profile::load(ppath);
+    check(loaded && loaded->matches(info) && loaded->params.size() == prof->params.size(), "profile reload");
+
+    // --- Fit a preset of the plugin's own (a small T6) ---
+    SpaceOptions spo;
+    spo.pin_pitch = true;
+    auto space = Space::build(params, info.format, &*loaded, spo);
+    std::printf("space: %zu active, %zu categorical\n", space.active().size(), space.categorical().size());
+    check(space.slot(ts::kHazNan).hi <= 0.75 && space.slot(ts::kLfoRate).role == Role::Fixed &&
+              space.slot(ts::kLfoSeed).role == Role::Fixed && space.slot(ts::kWave).role == Role::Categorical &&
+              space.slot(ts::kDetune).role == Role::Fixed,
+          "space from the profile: safe box, dead, seed and pitch fixed, wave categorical");
+    // The target preset in plain units, so it is the same sound in both formats: CLAP coordinates decode
+    // plain values (log for Hz/ms), the VST3 build (clap-wrapper) normalises them linearly.
+    auto coord_of = [&](ts::ParamId id, double plain) {
+        if (info.format == host::PluginFormat::Clap) return host::plain_to_coord(params[id], plain);
+        return (plain - ts::kParams[id].min) / (ts::kParams[id].max - ts::kParams[id].min);
+    };
+    auto truth = space.defaults();
+    truth[ts::kWave] = 1.0;
+    truth[ts::kCutoff] = coord_of(ts::kCutoff, 1500);
+    truth[ts::kDecay] = coord_of(ts::kDecay, 300);
+    truth[ts::kSustain] = coord_of(ts::kSustain, 30);
+    truth[ts::kDetune] = coord_of(ts::kDetune, 16);
+    std::printf("truth: cutoff %s, decay %s, sustain %s, detune %s\n", p0.value_text(ts::kCutoff, truth[ts::kCutoff]).c_str(),
+                p0.value_text(ts::kDecay, truth[ts::kDecay]).c_str(), p0.value_text(ts::kSustain, truth[ts::kSustain]).c_str(),
+                p0.value_text(ts::kDetune, truth[ts::kDetune]).c_str());
+    host::Job tj = job;
+    tj.coords = truth;
+    auto tr = render({tj});
+    check(!tr.empty() && tr[0].has_value(), "render the target preset: " + (tr.empty() || tr[0] ? std::string() : std::string(to_string(tr[0].error())) + " " + p0.last_message()));
+    if (tr.empty() || !tr[0]) return 1;
+    features::AnalyzeOptions ao;
+    ao.sample_rate = job.sample_rate;
+    auto target = features::Target::from_mono(mono_of(*tr[0]), job.sample_rate, ao);
+    check(target.has_value(), "target analysis");
+    if (!target) return 1;
+    // S0: the measured pitch is played (key + cents); the detune parameter stays at its default.
+    const auto& an = target->analysis();
+    std::printf("target: f0 %.2f Hz, key %d %+.1f cents, kind %s\n", an.f0, an.key, an.cents,
+                std::string(features::to_string(an.kind)).c_str());
+    check(an.key == 57 && std::abs(an.cents - 16.0) < 3.0, "S0 measures the target's pitch (key 57, +16 cents)");
+    job.notes[0].key = an.key;
+    job.notes[0].cents = an.cents;
+    features::ScorerOptions so;
+    so.solve_gain = space.level_index() < 0;  // spec 03 section 4: the level parameter matches the level
+    check(space.level_index() == long(ts::kLevel), "the level parameter is found");
+    AudioObjective obj(render, job, *target, features::Weights::preset(target->analysis().kind), so, 3);
+    check(obj.calibrate_offset(space.defaults()), "onset offset from the defaults");
+
+    PipelineOptions opt;
+    opt.max_evals = 4000;
+    opt.time_cap_s = 240;
+    opt.seed_samples = 150;
+    opt.restarts = 2;
+    opt.seed = 3;
+    opt.log = [](const std::string& s) { std::printf("  %s\n", s.c_str()); };
+    const auto res = run_pipeline(obj, space, opt);
+    std::printf("fit: loss %.3f dB after %ld evals in %.1f s (cache hits %zu); cutoff %.3f (truth %.3f), sustain %.3f "
+                "(truth %.3f), wave %.0f\n", res.best.eval.loss, res.evals, res.seconds, obj.cache().hits(),
+                res.best.coords[ts::kCutoff], truth[ts::kCutoff], res.best.coords[ts::kSustain], truth[ts::kSustain],
+                res.best.coords[ts::kWave]);
+    auto played = truth;  // the true preset with its pitch moved from the detune parameter to the note
+    played[ts::kDetune] = space.defaults()[ts::kDetune];
+    const auto self = obj.evaluate({played}, false);
+    std::printf("  loss of the true preset played at the measured pitch: %.3f dB\n", self[0].loss);
+    check(res.best.eval.ok() && res.best.eval.loss < 1.0, "fit recovers the preset (loss under 1 dB)");
+    check(res.best.coords[ts::kWave] == 1.0, "fit: wave (categorical) recovered");
+    const double cutoff_hz = std::atof(p0.value_text(ts::kCutoff, res.best.coords[ts::kCutoff]).c_str());
+    std::printf("  cutoff found: %.0f Hz (truth 1500 Hz)\n", cutoff_hz);
+    check(std::abs(std::log2(cutoff_hz / 1500.0)) < 0.25, "fit: cutoff recovered within a quarter octave");
+
+    for (std::size_t i = 0; i < res.best.coords.size(); ++i)
+        if (space.slot(i).role == Role::Fixed)
+            check(res.best.coords[i] == space.defaults()[i], "fixed parameter unchanged: " + params[i].name);
+    check(!res.top_k.empty(), "top-K answers");
+
+    // --- Fingerprints (spec 04 section 7) ---
+    FingerprintOptions fo;
+    fo.job = job;
+    fo.count = 240;
+    fo.seed = 9;
+    fo.threads = 3;
+    auto db = build_fingerprints(render, info, space, fo);
+    check(db.size() > 200 && db.matches(info, params), "fingerprint database built");
+    const auto fpath = FingerprintDb::default_path(dir, info);
+    check(db.save(fpath).has_value(), "fingerprint save");
+    auto db2 = FingerprintDb::load(fpath);
+    check(db2 && db2->size() == db.size(), "fingerprint reload");
+    if (db2) {
+        Embedder em(job.sample_rate);
+        const auto nn = db2->nearest(em.embed(target->mono()), 5);
+        double near = 0, rnd = 0;
+        for (auto i : nn) near += std::abs(db2->coords[i][ts::kCutoff] - truth[ts::kCutoff]);
+        for (std::size_t i = 0; i < 5; ++i) rnd += std::abs(db2->coords[i][ts::kCutoff] - truth[ts::kCutoff]);
+        std::printf("fingerprint: mean cutoff error of 5 nearest %.3f, of 5 arbitrary %.3f\n", near / 5, rnd / 5);
+        check(near < rnd, "fingerprint neighbours are closer to the target preset than arbitrary entries");
+    }
+    std::filesystem::remove_all(dir);
+    const auto st = (*pool)->total_stats();
+    std::printf("workers: %llu spawned, %llu crashes, %llu timeouts\n", (unsigned long long)st.spawned,
+                (unsigned long long)st.crashes, (unsigned long long)st.timeouts);
+
+    if (failures) {
+        std::fprintf(stderr, "%d failure(s)\n", failures);
+        return 1;
+    }
+    std::puts("mimicry_fit_test: all passed");
+    return 0;
+#endif
+}
