@@ -28,6 +28,7 @@ private:
 
     std::size_t n_;
     std::vector<std::complex<double>> twiddle_;
+    std::vector<std::complex<double>> stage_tw_;
     std::vector<std::size_t> rev_;
 };
 

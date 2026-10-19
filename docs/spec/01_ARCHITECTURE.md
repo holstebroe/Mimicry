@@ -67,15 +67,16 @@ feature code is one place.
 ## 5. Source layout (mirrors Acidus/Tannhauser)
 
 ```
-src/core/        Types, Rng, Json (minimal), Wav, Fft, Features, Loss, Cma (cma + sep-cma),
+src/core/        Types, Rng, Json (minimal), Wav, Fft, Cma (cma + sep-cma),
                  Sampling (Sobol/LHS), ParamSemantics, Constraints
+src/features/    Spectral (PowerStft), Pitch, Preprocess, Features, Loss (Target, Scorer, Weights)
 src/host/        PluginHost.hpp (interface), Renderer (job -> blocks, shared by backends),
                  clap/ (loader, HostApi, instance), vst3/ (module, component/controller,
                  host classes, ProcessData, state, .vstpreset), MessagePump
 src/worker/      worker_main, Ipc, SharedMem
-src/supervisor/  Pool, Scheduler, Watchdog, RenderCache
+src/supervisor/  Pool, Scheduler, Watchdog
 src/targets/     WavTarget, PluginTarget, ImageTarget, ProbePlan
-src/opt/         Pipeline (stages), Probe (sensitivity), Diversity, Fingerprint
+src/opt/         RenderCache, Pipeline (stages), Probe (sensitivity), Diversity, Fingerprint
 src/output/      Report, AbWav, Ppm, PresetExport (state, params.json, .vstpreset)
 src/app/         main + commands
 src/gui/         (later) Graphics/Font/ModernDraw/window glue taken from Acidus

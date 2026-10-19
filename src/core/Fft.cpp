@@ -12,6 +12,10 @@ Fft::Fft(std::size_t size) : n_(size) {
         const double a = -2.0 * 3.141592653589793238462643 * static_cast<double>(k) / static_cast<double>(n_);
         twiddle_[k] = {std::cos(a), std::sin(a)};
     }
+    // Per-stage twiddles, contiguous: the stage with half-length h reads stage_tw_[h - 1 .. 2h - 2].
+    stage_tw_.resize(n_ - 1);
+    for (std::size_t h = 1; h < n_; h <<= 1)
+        for (std::size_t j = 0; j < h; ++j) stage_tw_[h - 1 + j] = twiddle_[j * (n_ / (2 * h))];
     rev_.resize(n_);
     std::size_t bits = 0;
     while ((std::size_t{1} << bits) < n_) ++bits;
@@ -27,16 +31,20 @@ void Fft::transform(std::vector<std::complex<double>>& d, bool inverse) const {
     if (d.size() != n_) throw std::invalid_argument("Fft: wrong buffer size");
     for (std::size_t i = 0; i < n_; ++i)
         if (i < rev_[i]) std::swap(d[i], d[rev_[i]]);
+    // Plain real arithmetic: std::complex multiplication goes through a NaN-checking libcall without
+    // -fcx-limited-range, which made this loop several times slower.
+    const double sign = inverse ? -1.0 : 1.0;
     for (std::size_t len = 2; len <= n_; len <<= 1) {
-        const std::size_t half = len / 2, step = n_ / len;
+        const std::size_t half = len / 2;
+        const std::complex<double>* tw = &stage_tw_[half - 1];
         for (std::size_t i = 0; i < n_; i += len) {
             for (std::size_t j = 0; j < half; ++j) {
-                auto w = twiddle_[j * step];
-                if (inverse) w = std::conj(w);
-                const auto u = d[i + j];
-                const auto v = d[i + j + half] * w;
-                d[i + j] = u + v;
-                d[i + j + half] = u - v;
+                const double wr = tw[j].real(), wi = sign * tw[j].imag();
+                const double xr = d[i + j + half].real(), xi = d[i + j + half].imag();
+                const double vr = xr * wr - xi * wi, vi = xr * wi + xi * wr;
+                const double ur = d[i + j].real(), ui = d[i + j].imag();
+                d[i + j] = {ur + vr, ui + vi};
+                d[i + j + half] = {ur - vr, ui - vi};
             }
         }
     }

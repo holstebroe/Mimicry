@@ -58,6 +58,16 @@ endif()
 target_compile_definitions(mimicry_core PUBLIC MIMICRY_VERSION=\"${PROJECT_VERSION}\")
 mimicry_warnings(mimicry_core)
 
+add_library(mimicry_features STATIC
+    src/features/Features.cpp
+    src/features/Loss.cpp
+    src/features/Pitch.cpp
+    src/features/Preprocess.cpp
+    src/features/Spectral.cpp
+)
+target_link_libraries(mimicry_features PUBLIC mimicry_core)
+mimicry_warnings(mimicry_features)
+
 add_library(mimicry_host STATIC
     src/host/Codec.cpp
     src/host/FileHash.cpp
@@ -174,6 +184,11 @@ if(MIMICRY_BUILD_TESTS)
     target_link_libraries(mimicry_smoke_test PRIVATE mimicry_host mimicry_core)
     mimicry_warnings(mimicry_smoke_test)
     add_test(NAME smoke COMMAND mimicry_smoke_test)
+
+    add_executable(mimicry_features_test src/tests/features_test_main.cpp)
+    target_link_libraries(mimicry_features_test PRIVATE mimicry_features mimicry_host mimicry_core)
+    mimicry_warnings(mimicry_features_test)
+    add_test(NAME features COMMAND mimicry_features_test)
 
     add_executable(mimicry_core_test src/tests/core_test_main.cpp)
     target_link_libraries(mimicry_core_test PRIVATE mimicry_core)

@@ -71,3 +71,35 @@ Feature extraction must stay well below render time. Targets [D]: a 2 s note cos
 features per candidate with cached target spectra and preallocated FFT plans. The target's features are
 computed once; `RenderCache` keys on the exact parameter bytes, note plan, rate and block size so
 duplicate candidates render once [S: Acidus `_job_key`].
+
+## 8. Implementation details (WP2)
+
+Where the sections above leave a number open, `src/features` uses these [D] unless noted:
+
+- **Frames.** Only full frames are analysed; the candidate is shifted by the fitted onset offset and
+  padded or cut to the target's length first. `msstft` is the mean over the three sizes; `bands` frames
+  are the power of two nearest 23 ms (hop half a frame), 1/3-octave bands without a bin are dropped.
+- **Floors.** `msstft`: per-bin 10th percentile over frames. `bands`: quietest frame per band [S]. `harm`:
+  mean power of the two gaps beside the harmonic. On top of that nothing more than 90 dB below the
+  target's own peak is scored (`dynamic_range_db`), for every log feature.
+- **Gain.** Median (the L1 optimum) of target minus candidate over `msstft` 2048-point cells that are
+  at least 3 dB above the floor in both. Digital silence in the candidate stays silent after the gain.
+- **`inter`** is one-sided: only energy the candidate adds above the target's own gap level counts, and
+  it is a mean over the gaps, so a single spur in a 64-harmonic comb costs a fraction of its height.
+- **`env`** window is 2 pitch periods only when the target is scored as pitched (kind note, or `--note`).
+- **`shape`** is the mean over active frames (2048 points, hop 512, within 60 dB of the loudest) of
+  log2 centroid, flatness in dB, log2 rolloff (85 %), flux of unit-norm magnitudes and MFCC 1-13 of a
+  26-band mel filterbank in dB (c0 is left out, so the feature is level independent). The loss is the mean
+  of 6 x |d centroid|, |d flatness|, 6 x |d rolloff|, 10 x |d flux| and the RMS MFCC difference.
+- **Kind** from the 1 ms envelope: note if f0 confidence >= 0.5; loop if >= 3 onsets (9 dB within 20 ms)
+  and >= 2 s; hit if shorter than 1.5 s with a 30-to-3 dB attack under 20 ms; else texture.
+- **f0** uses the loudest 64k samples, the 12 strongest peaks as comb seeds (also at 1/2 ... 1/8), a
+  1 dB per missing harmonic penalty, and `confidence = 2 * (comb energy share - 0.5)`.
+- **Repeatability.** Renders per candidate: 1 below 0.5 dB, else `ceil(floor / 0.5) + 1` clamped to 2-4;
+  success threshold 1.5 x floor.
+- **Render cache.** Key = exact bytes of the parameter vector, note plan, rate, block size, settle,
+  tail, peak limit and the silent flag. Failed renders are cached (rule 6) except timeout and host
+  error, which may be transient.
+- **Cost.** Measured 17 ms (unpitched) to 27 ms (pitched) per 2 s candidate at 48 kHz on the build
+  machine, against the 5 ms goal above; the three STFT families, the 40 ms `harmt` frames and the
+  whole-note DFT dominate. Optimising is deferred until the optimizer exists (OQ2).

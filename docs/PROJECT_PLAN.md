@@ -61,11 +61,11 @@ build/mimicry fit --plugin path/to/plugin.vst3 --wav target.wav --minutes 20
 ### WP2 — Features and loss (spec 03)
 | ID | Issue | Status |
 | --- | --- | --- |
-| 2.1 | `msstft`, `env`, `bands`, noise-floor clamp, closed-form gain | ⬜ |
-| 2.2 | f0 estimation and pitch application (VST3 tuning cents / CLAP note expression / bend calibration) | ⬜ |
-| 2.3 | `harm`, `inter`, `harmt` for pitched targets (port from Acidus) | ⬜ |
-| 2.4 | `shape` features, weight presets by sample kind | ⬜ |
-| 2.5 | Repeatability floor, render cache | ⬜ |
+| 2.1 | `msstft`, `env`, `bands`, noise-floor clamp, closed-form gain | ✅ `src/features` (`Features`, `Loss`, `Preprocess`); T4 invariance (gain, phase, polarity, time shift) in `mimicry_features_test`. Cost is ~27 ms per candidate for a 2 s note, not the 5 ms target of spec 03 §7 (OQ2) |
+| 2.2 | f0 estimation and pitch application (VST3 tuning cents / CLAP note expression / bend calibration) | 🟡 `Pitch`: comb search + LS refinement, key/cents, `--note` parsing; `Target` turns it into the note key and cents. Tuning cents and nearest-key fallback were already in the backends (1.2, 1.7); MIDI pitch-bend calibration and the residual report are open |
+| 2.3 | `harm`, `inter`, `harmt` for pitched targets (port from Acidus) | ✅ written from the spec definitions (Acidus source is not in this repository, so the evidence tags stay [S] only where the spec says so); one-sided `inter` against the target's own gap level |
+| 2.4 | `shape` features, weight presets by sample kind | ✅ `shape` (centroid, flatness, rolloff, flux, MFCC 1-13), `Weights::preset`, `--w-<feature>` override (`Weights::set`), kind classifier with `--kind` override. Thresholds are [D] guesses (OQ3) |
+| 2.5 | Repeatability floor, render cache | 🟡 `repeatability_floor_db`, `repeat_policy` (renders 1-4, success threshold 1.5x), `opt::RenderCache` (exact key, LRU, failures cached except timeout/host error). Open: pinning seed/random parameters, wiring into the optimizer (WP3) |
 
 ### WP3 — Optimizer (spec 04)
 | ID | Issue | Status |
@@ -154,6 +154,8 @@ built and tested against both formats from the start.
 | 2026-10-17 | License MIT (kept from the initial repo commit) |
 
 ## Progress log
+
+- 2026-10-19: WP2 features and loss in `src/features` (library `mimicry_features`, test `mimicry_features_test`): pre-processing, f0, `msstft`/`env`/`bands`/`harm`/`inter`/`harmt`/`shape`, noise-floor clamp, closed-form gain, weights and kind classifier, onset offset, repeatability policy, `opt::RenderCache`. `Fft` inner loop rewritten without `std::complex` multiplication (about 3x faster). Open: pitch-bend calibration (2.2), seed pinning (2.5), feature cost still ~27 ms per 2 s candidate (OQ2). The CLAP/VST3 host tests are not built in this checkout (clap submodule absent), so only smoke, core and features ran.
 
 - 2026-10-17: Specification written (this document set). No code yet.
 - 2026-10-17: Specs updated for VST3 hosting: 01, 02 (rewritten around `PluginHost`), 05 §9, 06, 07 (T13-T16, `.vstpreset`), this plan.
