@@ -1,7 +1,9 @@
 # 01 — Architecture
 
 Mimicry hosts a plugin (**CLAP or VST3**) offline, renders it, and searches its parameter space for
-the preset whose sound is closest to a **target**: a WAV, an image, or another plugin's preset. It
+the preset whose sound is closest to a **target**: a WAV, an image, or another plugin's preset
+(instrument or effect). It can also harvest a plugin's presets (06 §6) and report what a plugin and each
+of its parameters does (`doctor`, 08). It
 generalises what Acidus already does to fit itself to a hardware TB-303 (`tools/calibrate_reference.py`,
 `tools/fit_stage.py`, `docs/EMULATION_TRAINING_PLAN.md`).
 
@@ -75,10 +77,10 @@ src/host/        PluginHost.hpp (interface), Renderer (job -> blocks, shared by 
                  host classes, ProcessData, state, .vstpreset), MessagePump
 src/worker/      worker_main, Ipc, SharedMem
 src/supervisor/  Pool, Scheduler, Watchdog
-src/targets/     WavTarget, PluginTarget, ImageTarget, ProbePlan
+src/targets/     WavTarget, PluginTarget, ImageTarget, ProbePlan, ProbeSignals (effect inputs), Harvest
 src/opt/         RenderCache, Space (encoding), Objective (render + score), Embedding, Pipeline (stages,
                  restarts, top-K diversity), Probe (sensitivity), Profile, Fingerprint, Surrogate
-src/output/      Report, AbWav, Ppm, PresetExport (state, params.json, .vstpreset)
+src/output/      Report, AbWav, Ppm, PresetExport (state, params.json, .vstpreset), Svg, DoctorReport
 src/app/         main + commands
 src/gui/         (later) Graphics/Font/ModernDraw/window glue taken from Acidus
 src/tests/       unit + integration executables; test_synth/ (hazard plugin, built as CLAP and VST3)
@@ -100,7 +102,11 @@ builds use IPO and size-optimise glue as in Acidus [S].
 | `mimicry list <plugin>` | Enumerate parameters with semantics guess, units, flags |
 | `mimicry probe <plugin>` | Sensitivity + safe-range + hazard probe; writes the plugin profile |
 | `mimicry fit --plugin P --wav T.wav` | Match a WAV |
-| `mimicry transfer --source A --target B` | Match source presets (one, several, or all) in B; A and B may be different formats |
+| `mimicry harvest <plugin>` | Collect the plugin's presets as verified states into a library (06 §6) |
+| `mimicry capture <plugin>` | Open the plugin's editor; the user picks presets and Mimicry saves them (06 §6) |
+| `mimicry transfer --source A --target B` | Match source presets (one, several, or all) in B; A and B may be different formats, instruments or effects |
+| `mimicry map --source A --target B` | Parameter map between two plugins, and to roles, without fitting (04 §8) |
+| `mimicry doctor <plugin> [<plugin>]` | Diagnosis report of the plugin and every parameter; with two plugins, a comparison (08) |
 | `mimicry image --plugin P --image I.png` | Match an image (descriptor or spectrogram route) |
 | `mimicry fingerprint <plugin>` | Build the random-preset feature database |
 | `mimicry rehearse <plugin>` | Round-trip self-test (plugin as its own target) |
@@ -111,6 +117,7 @@ builds use IPO and size-optimise glue as in Acidus [S].
 
 `profiles/<format>-<plugin-uid>-<version-hash>.json`, written by `probe` and updated by every run (like
 Acidus's `calibrations/*.json` [S]): parameter semantics and confidence, log/linear choice, dead
-parameters, safe box per parameter, learned hazard constraints, repeatability floor, render cost.
+parameters, safe box per parameter, learned hazard constraints, repeatability floor, render cost,
+parameter roles (04 §2) and the harvest recipe (06 §6).
 The same plugin hosted as CLAP and as VST3 has two profiles (parameter ids, tapers and the offline
 mode can differ). A profile makes every later run on the same plugin faster and safer.

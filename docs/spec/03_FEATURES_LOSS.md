@@ -103,3 +103,13 @@ Where the sections above leave a number open, `src/features` uses these [D] unle
 - **Cost.** Measured 17 ms (unpitched) to 27 ms (pitched) per 2 s candidate at 48 kHz on the build
   machine, against the 5 ms goal above; the three STFT families, the 40 ms `harmt` frames and the
   whole-note DFT dominate. Optimising is deferred until the optimizer exists (OQ2).
+
+## 9. Effect features [A]
+
+An effect render is scored with the same features against the target's output for the same input
+signal (06 §5): `msstft`, `bands`, `env` and `shape` apply unchanged. For effects the loss adds, per
+probe signal where it is informative: band gains of the response (impulse, sweep), harmonic levels
+relative to the fundamental (sine at two levels), output level against input level (stepped sines), tail
+decay (energy decay curve), and modulation rate and depth from the band envelopes of a sustained tone.
+All are phase-insensitive (an LFO's start phase and a delay's polarity do not change them), and each
+gets a T4 invariance case (07 §4) when it is implemented (CLAUDE.md rule 10).

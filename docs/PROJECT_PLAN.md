@@ -7,7 +7,10 @@ Status: ✅ done · 🟡 partial / first version · ⬜ open · 🔬 needs measu
 
 **Goal 1:** `mimicry fit` matches a WAV with a **CLAP or VST3** instrument, safely, offline, with a preset
 and A/B audio out. **Goal 2:** plugin-to-plugin transfer over a whole bank, in any format combination
-(CLAP→VST3, VST3→CLAP, same format). **Goal 3:** image targets.
+(CLAP→VST3, VST3→CLAP, same format), for instruments and effects, with the least error the target
+plugin allows; the source presets are harvested by whatever method the source supports, down to the user
+picking them by hand in the plugin's own editor. **Goal 3:** image targets. **Goal 4:** `mimicry doctor`,
+a report of what a plugin and each of its parameters does (spec 08).
 
 Idea origin: a tool that hosts a plugin, takes a sample, and uses a non-linear optimizer to build a
 preset that matches it; variants take an image, or a source plugin's presets with a target plugin.
@@ -23,7 +26,19 @@ Optimizer techniques come from Acidus (`tools/calibrate_reference.py`, `tools/fi
 | `spec/04_OPTIMIZER.md` | Encoding, semantics, probe, stage pipeline, CMA-ES, diversity, fingerprint, mapping |
 | `spec/05_RESILIENCE.md` | Isolation, outcomes, search under failure, failure bisection, state poisoning, format-specific notes |
 | `spec/06_TARGETS.md` | WAV, plugin-to-plugin (cross-format), image, effects |
-| `spec/07_OUTPUT_VALIDATION.md` | Run output, `.vstpreset` export, generalisation checks, tests T1-T16, test synth |
+| `spec/07_OUTPUT_VALIDATION.md` | Run output, `.vstpreset` export, generalisation checks, tests T1-T20, test synth |
+| `spec/08_DIAGNOSIS.md` | `mimicry doctor`: measurements per plugin and per parameter, effect views, HTML report |
+
+## Use cases
+
+| Use case | Where |
+| --- | --- |
+| Preset for a plugin from a WAV specimen | Goal 1, WP5.1 (`fit`) |
+| Presets for a target plugin from a source plugin's presets (synth or effect, any format pair) | Goal 2, WP5.2-5.3, 5.7, 5.11; source presets from the harvest (WP5.8-5.10, WP1.11-1.12) |
+| How the source changes preset | Harvest ladder, spec 06 §6: preset files, CLAP preset discovery + preset-load, VST3 program data / program lists / program-change parameter, MIDI program change, manual capture through the plugin's editor; every load verified and the method that worked kept in the profile |
+| Map target parameters to source parameters and to roles (cutoff, attack, ...) | WP3.9 (roles), WP5.4a (map from probe signatures and units), WP5.4b (map learned from transfers), spec 04 §2 and §8 |
+| Instruments and effects | Instruments throughout; effects: WP1.10 (audio input), WP3.10 (effect probe), WP5.7 (probe signals, reamp, effect transfer), spec 06 §5 |
+| Diagnosis report of a plugin and its parameters (PluginDoctor-like) | Goal 4, WP8, spec 08 |
 
 ## Build and run
 
@@ -59,6 +74,9 @@ build/mimicry fit --plugin path/to/plugin.vst3 --wav target.wav --minutes 20
 | 1.7 | **VST3 backend**: SDK hosting module loading, component + controller + connection, host classes, `ProcessData`, parameter changes, event list, offline setup | ✅ `host/vst3/Vst3Engine.cpp` on the SDK hosting classes; T13 equivalence passes against the clap-wrapper build. Real third-party VST3 plugins not yet tried (OQ5) |
 | 1.8 | VST3 state (component + controller), program lists, program-change pinning, restart requests, tail/latency | 🟡 state, pinning (flag or name heuristic), restart/rescan, tail, latency done; program lists (`IUnitInfo`) open |
 | 1.9 | Main-thread message pump in the worker (Win32 / macOS / Linux) | 🟡 `MessagePump` + 10 ms idle pump in the worker; Win32 and macOS run-loop code written but unbuilt/unverified |
+| 1.10 | **Audio input** for effects: `Job.input` (per-channel buffer, sample-exact start), input bus setup in both backends (CLAP audio-ports, VST3 input bus arrangement), input through worker shared memory, latency compensation of the returned audio (spec 02 §1, §5) | ⬜ |
+| 1.11 | **Preset application primitives** (spec 02 §7): `Instance::presets()`, `apply_preset(ref)` returning state blob + parameter snapshot; CLAP preset-discovery factory + preset-load (async, `loaded`/`on_error`); VST3 `IUnitInfo` program lists, `IProgramListData::getProgramData`, program-change parameter, `IMidiMapping` program change; MIDI program change for CLAP; a source render mode "state instead of coords" | ⬜ |
+| 1.12 | **Plugin editor in the worker** for manual capture (spec 02 §3, 06 §6): CLAP `gui` (x11 / win32 / cocoa, floating or embedded), VST3 `IPlugView` (`IPlugFrame`, Linux `IRunLoop`), a native top-level window per platform, parameter-change notifications from the editor reported to the supervisor (OQ12) | ⬜ |
 
 ### WP2 — Features and loss (spec 03)
 | ID | Issue | Status |
@@ -80,6 +98,8 @@ build/mimicry fit --plugin path/to/plugin.vst3 --wav target.wav --minutes 20
 | 3.6 | Categorical outer loop; R restarts; top-K diversity | ✅ S6 (importance, enumeration of <= 3 x 4 values, inner S5), R independent runs, top-K by parameter and embedding distance (`opt/Embedding`) |
 | 3.7 | Fingerprint database and nearest-neighbour seeding | ✅ `opt/Fingerprint` (`mimicry fingerprint`, binary file, exact parameter-table match); `fit` seeds S1 with the 8 nearest neighbours, conformed to the fit's space (fixed parameters at default) |
 | 3.8 | Surrogate / Bayesian optimisation for slow plugins | 🟡 `opt/Surrogate`: GP pre-screening of 3λ CMA-ES samples (auto above 1 s per candidate). Not yet measured on a slow real plugin |
+| 3.9 | **Parameter roles** (spec 04 §2): a fixed vocabulary below the groups (cutoff, resonance, filter env amount, attack, decay, sustain, release, detune, drive, mix, ...), guessed from name + units + value text, confirmed or overridden by the probe signature; stored in the profile and shown by `list` and `doctor` | ⬜ |
+| 3.10 | **Effect sensitivity probe** (spec 04 §3): the probe renders the effect probe signals instead of notes and records effect features (response tilt and bands, THD, gain at levels, tail, modulation depth) | ⬜ |
 
 ### WP4 — Resilience (spec 05)
 | ID | Issue | Status |
@@ -97,11 +117,15 @@ build/mimicry fit --plugin path/to/plugin.vst3 --wav target.wav --minutes 20
 | 5.1 | WAV target analysis and `mimicry fit` | 🟡 `mimicry fit` runs end to end (analysis, pitch to the note, profile, fingerprints, pipeline, run directory). Open: `--midi`, `--gate` defaults from the envelope, `--velocity` |
 | 5.2 | Probe plans, source rendering and cache | ⬜ |
 | 5.3 | `mimicry transfer` for one preset, then the bank loop and report, in any format combination | ⬜ |
-| 5.4 | Learned mapping `knob_map.json` (keyed by source and target format + uid) | ⬜ |
+| 5.4a | **Map without fitting** (`mimicry map --source A --target B`, spec 04 §8): match parameters by role, units and probe signature; exact laws where both value texts carry a unit (cutoff in Hz); many-to-one and one-to-many links; `knob_map.json` with a confidence per entry | ⬜ |
+| 5.4b | Learned mapping from solved transfers (>= 50 pairs) refines 5.4a; keyed by source and target format + uid | ⬜ |
 | 5.5 | Image Route A (descriptors) and `image_map.json` | ⬜ |
 | 5.6 | Image Route B (spectrogram) | ⬜ |
-| 5.7 | Effect plugins: reamp, known source | ⬜ |
-| 5.8 | Preset sources: `.vstpreset`, VST3 program lists, CLAP preset-load/discovery, state files, folders | ⬜ |
+| 5.7 | Effect plugins (spec 06 §5): built-in probe signals generated in code (impulse, log sweep, stepped-level sines, sustained tone/chord, noise bursts, synthetic drum hit and loop, silence), `plans/effect_default.json`; reamp and known-source targets; effect-to-effect transfer over the probe signals; effect features (06 §5) with T4 invariance cases; an effect build of the test plugin (`mimicry_test_fx`) | ⬜ |
+| 5.8 | **Preset harvest, automatic** (`mimicry harvest <plugin>`, spec 06 §6): the ladder of methods (files, CLAP preset discovery, VST3 program data, program lists, program-change parameter, MIDI program change), each preset verified (state differs, render differs from defaults beyond the floor, repeatable), duplicates removed, a library of state + params + name, `harvest-report.csv`; a failed method is reported and the next is tried | ⬜ |
+| 5.9 | **Preset harvest, manual** (`mimicry capture <plugin>`, spec 06 §6): the worker opens the plugin's editor (WP1.12); the user picks presets in the plugin's own browser; a capture key/button saves state + params + a name; watch mode captures automatically when a burst of parameter changes or a restart request signals a preset change, with dedupe by state hash | ⬜ |
+| 5.10 | **Harvest recipe** in the plugin profile: the method that worked, its parameters (program-change id, count, settle and wait times), so later harvests of the same plugin skip the ladder; recipes shared as JSON | ⬜ |
+| 5.11 | **Least-error transfer** (spec 06 §7): per preset fit and holdout loss against the repeatability floor, unmatched reasons (feature the target lacks), a ranking of candidate target plugins for a source bank (`transfer --target A --target B`), and preset names carried over | ⬜ |
 
 ### WP6 — Output and tests (spec 07)
 | ID | Issue | Status |
@@ -112,6 +136,7 @@ build/mimicry fit --plugin path/to/plugin.vst3 --wav target.wav --minutes 20
 | 6.4 | `mimicry rehearse` round trip | ⬜ |
 | 6.5 | `.vstpreset` writer and round-trip test (T14) | ⬜ |
 | 6.6 | Backend equivalence, cross-format transfer, VST3 specifics (T13, T15, T16) | 🟡 T13 done; T15, T16 open |
+| 6.7 | Harvest, effect, map and doctor tests (T17-T20); test synth factory presets exposed through CLAP preset discovery and a VST3 program list | ⬜ |
 
 ### WP7 — Later
 | ID | Issue | Status |
@@ -120,12 +145,24 @@ build/mimicry fit --plugin path/to/plugin.vst3 --wav target.wav --minutes 20
 | 7.2 | Mimicry Capture plugin (CLAP + VST3 via clap-wrapper) | ⬜ |
 | 7.3 | Stereo features | ⬜ |
 | 7.4 | Further backends (AU, LV2) if wanted; VST2 is out of scope | ⬜ |
+| 7.5 | Learned editor automation for harvest: record the user's clicks on the plugin's own "next preset" control in capture mode, replay them as synthetic input to the editor window, verify each step by the state hash, and loop through a bank unattended (experimental, per platform) | ⬜ |
+
+### WP8 — Diagnosis (`mimicry doctor`, spec 08)
+| ID | Issue | Status |
+| --- | --- | --- |
+| 8.1 | Identity, health and parameter sections from probe + profile (latency, tail, floor, offline vs realtime, render cost, hazards, roles, classes, safe range, interactions) | ⬜ |
+| 8.2 | Instrument views: per-parameter feature curves, spectrum and envelope overlays at the probe values | ⬜ |
+| 8.3 | Effect views (PluginDoctor-like): frequency response, harmonics/THD, dynamics curve, impulse response and decay, modulation, noise; overlays per parameter | ⬜ |
+| 8.4 | Report writer: self-contained `report.html` with own SVG plots, `report.json`; no dependency | ⬜ |
+| 8.5 | Two-plugin comparison (`doctor A B`) with the parameter map (WP5.4a) | ⬜ |
 
 ## Suggested order
 
 WP0 → WP1.1-1.6 (interface, CLAP backend, test synth in both builds; everything is developed against
 it) → WP2.1/2.5 → WP3.1-3.3 (first working `fit` on CLAP, no names, no probe) → WP6.1 → **WP1.7-1.9
-(VST3 backend, T13)** → WP4.1 → WP3.4-3.6 → WP4.2-4.6 → WP5.2-5.4, 5.8 → WP6.5-6.6 → WP5.5-5.6 → WP7.
+(VST3 backend, T13)** → WP4.1 → WP3.4-3.6 → WP4.2-4.6 → WP1.11, WP5.8, 5.10 (automatic harvest) → WP5.2-5.3 → WP3.9, WP5.4a → WP8.1-8.2, 8.4 → WP1.10,
+WP3.10, WP5.7, WP8.3 (effects) → WP1.12, WP5.9 (manual capture) → WP5.4b, 5.11 → WP6.5-6.7 → WP5.5-5.6 →
+WP7.
 
 The VST3 backend lands before the resilience work so failure handling, probes and plugin profiles are
 built and tested against both formats from the start.
@@ -144,6 +181,10 @@ built and tested against both formats from the start.
 | OQ8 | VST3 offline processing mode vs realtime: how many real plugins sound different, and should the fit offer `--realtime-mode`? | 🔬 |
 | OQ9 | VST3 coordinate: native normalised is the default (02 §1); does the probe show plugins with tapers bad enough to need a re-mapped coordinate? Yes for clap-wrapper builds: the test synth's 20 Hz-20 kHz cutoff is linear in its VST3 normalised value, and without a warp the VST3 fit stalled at 2-4 dB. The optimizer now warps any parameter whose probe response is log (04 §9). Open: how many third-party VST3 plugins need it | 🔬 |
 | OQ11 | `estimate_f0` puts a pure sine at a subharmonic (220 Hz read as 31.4 Hz = f/7). Harmless for the probe (harmonic jumps are ignored) but it would mis-set `harm`/`env` for a sine target (WP2.2) | 🔬 |
+| OQ12 | Plugin editors need a native window: X11 (libX11/xcb, a system library) on Linux, Win32, Cocoa on macOS. These are OS APIs, not frameworks, but X11 is a new link dependency; and VST3 on Linux needs a host `IRunLoop` (fd and timer callbacks). Decide: link X11 only into `mimicry_worker` behind a CMake option (`MIMICRY_EDITOR`, default ON where available)? | 🔬 |
+| OQ13 | Preset change detection in watch mode: how reliable are a burst of parameter changes (CLAP output events / rescan, VST3 `performEdit` or `restartComponent(kParamValuesChanged)`) and a changed state hash as signals? Plugins with hidden state (wavetables, samples) may change state without parameter events. Measure on real plugins | 🔬 |
+| OQ14 | Preset names in manual capture: VST3 program names and CLAP discovery names when available; otherwise the user types one or accepts `capture-NNN`. Is reading the editor's window title or reading back a "preset name" parameter text worth trying? | 🔬 |
+| OQ15 | Which effect probe signals are enough to identify typical effects (EQ, filter, compressor, distortion, chorus/phaser, delay, reverb) without making every candidate render slow; tune the default effect plan on real plugins | 🔬 |
 | OQ10 | Resolved: baseline lowered to C++20 with an `expected` shim (see decision log); Clang 18 + libstdc++ 13 no longer blocked. Open detail: verify on MSVC and AppleClang once CI has run | 🔬 |
 
 ## Decision log
@@ -155,9 +196,13 @@ built and tested against both formats from the start.
 | 2026-10-17 | `std::format` instead of `std::print` until the CI baseline has it (GCC 14); `std::expected` stays and sets the Clang baseline (OQ10) |
 | 2026-10-17 | **C++20 instead of C++23** (owner: newer standard not important). `std::expected` is replaced by `mimicry::expected` (shim, aliases std when available); C++23 still builds. Supersedes the C++23 and `std::expected` decisions above |
 | 2026-10-17 | License MIT (kept from the initial repo commit) |
+| 2026-10-19 | **Preset harvesting** is a ladder of methods (files, CLAP preset discovery, VST3 program data and program lists, program-change parameter, MIDI program change, then manual capture in the plugin's editor). Every source preset is normalised once to a verified state blob + parameter snapshot, and the source renders from that state; program changes happen only in harvest jobs, never during a fit. The method that worked is kept per plugin as a recipe |
+| 2026-10-19 | The worker may open the plugin's editor for manual capture only (`capture`); fit, probe and transfer stay windowless. Editors run in `mimicry_worker` like every other plugin call (rule 4) |
+| 2026-10-19 | Effects are first-class: audio input in `Job`, a built-in probe signal set generated in code, effect-to-effect transfer. Parameter roles (cutoff, attack, ...) sit below the groups and drive the map and the doctor report. `mimicry doctor` (spec 08) added as Goal 4 |
 
 ## Progress log
 
+- 2026-10-19: Use cases checked against the plan and written in (use-case table): preset harvesting (WP1.11, 1.12, 5.8-5.10, 7.5), parameter roles and maps (WP3.9, 5.4a/b), effects (WP1.10, 3.10, 5.7), least-error transfer (5.11), diagnosis report (WP8, new spec 08), tests T17-T20 (6.7), OQ12-OQ15. Specs 01-07 updated, spec 08 added. Planning only, no code.
 - 2026-10-19: WP3 review fixes: seeds (fingerprint neighbours, warm starts) are conformed to the space, so `--fix`, pinned pitch and grid steps hold; probe safe box narrowed when the value next to the default fails; S5 restarts never reuse a start; the surrogate trains only on points that agree with the run's held parameters; top-K embeddings come from one cached render (`Objective::embed`) and failures are counted; `fit` asks `value_text` through `WorkerPool::value_text` on a pool thread; CMA-ES restart policy shared (`cma_restart_options`, `cma_should_restart`), one per-plugin file naming rule (`plugin_file_path`), one grid snap (`snap_to_grid`), `Space::sample_box` for S1 and fingerprints. New unit checks in `opt`. All 11 ctest tests pass.
 - 2026-10-19: WP3 optimizer: `core/Cma` (CMA-ES, sep-CMA-ES, Jacobi), `core/Sampling` (LHS), `core/ParamSemantics`; library `mimicry_opt` with `Space`, `Objective`, `Embedding`, `Probe`, `Profile`, `Pipeline` (S1-S7, R restarts, top-K, categorical sweep and outer loop), `Fingerprint`, `Surrogate`. Commands `list`, `probe`, `fingerprint`, `fit` implemented. Found and fixed a WP1.5 bug: pool workers respawned on short-lived threads were killed by `PR_SET_PDEATHSIG` (regression check in `worker_*`). Two spec decisions from measurements: pitch-only parameters are pinned when S0 applies pitch (a detune basin is ~20 cents wide and flat elsewhere), and a probe-measured log response is warped in either format (OQ9). Tests: `opt` (T5 and units), `fit_clap`/`fit_vst3` (probe classes, safe box from the NaN and hang hazards, profile round trip, preset recovered < 1 dB, fingerprint neighbours). All 11 ctest tests pass on Linux/GCC 13 with the clap submodule and VST3 SDK.
 - 2026-10-19: WP2 features and loss in `src/features` (library `mimicry_features`, test `mimicry_features_test`): pre-processing, f0, `msstft`/`env`/`bands`/`harm`/`inter`/`harmt`/`shape`, noise-floor clamp, closed-form gain, weights and kind classifier, onset offset, repeatability policy, `opt::RenderCache`. `Fft` inner loop rewritten without `std::complex` multiplication (about 3x faster). Open: pitch-bend calibration (2.2), seed pinning (2.5), feature cost still ~27 ms per 2 s candidate (OQ2). The CLAP/VST3 host tests are not built in this checkout (clap submodule absent), so only smoke, core and features ran.

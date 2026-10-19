@@ -12,12 +12,17 @@ PluginHost::open(path, plugin_uid)        -> expected<Instance, HostError>     /
 Instance::info()                          -> { format, uid, name, vendor, version hash, kind }
 Instance::parameters()                    -> vector<ParamDesc>
 Instance::value_text(id, coord)           -> string                            // for units and semantics
-Instance::presets()                       -> vector<PresetRef>                 // factory programs / files
+Instance::presets()                       -> vector<PresetRef>                 // factory programs / files (§7)
+Instance::apply_preset(ref)               -> expected<Captured, HostError>     // state blob + parameter snapshot (§7)
+Instance::open_editor() / close_editor()  -> expected<void>                    // capture only (§3, 06 §6)
 Instance::render(Job)                     -> expected<Audio, Outcome>          // 05 §2 outcome codes
 Instance::save_state() / load_state(blob) -> expected<Blob / void>
 Instance::tail_samples() / latency()      -> int
 Instance::reset()                         -> expected<void>                    // 05 §5
 ```
+
+`Job` also carries an optional **input** (per-channel audio and its start sample) for effects, and
+an optional **state** that replaces `coords` for source renders of harvested presets (§7) [A].
 
 `ParamDesc` = `{ id (uint32), name, module path, units, steps (0 = continuous), default, flags (hidden,
 readonly, bypass, program-change, automatable), coord }`. Both formats use 32-bit parameter ids [S: CLAP
@@ -51,7 +56,9 @@ string or the VST3 class id (TUID) plus name.
 | State | `clap.state` save/load | `IComponent::getState/setState`, `IEditController::setComponentState`, controller `getState/setState` |
 | Tail / latency | `clap.tail`, `clap.latency` | `getTailSamples`, `getLatencySamples` |
 | Reset | `deactivate` + `activate` (or `reset`) | `setProcessing(false)`, `setActive(false)`, `setActive(true)`, `setProcessing(true)` |
-| Factory presets | preset-load / discovery extensions | `IUnitInfo` program lists (select through the program-change parameter) and `.vstpreset` files |
+| Factory presets | preset-discovery factory + `preset-load` extension (`from_location`, async `loaded` / `on_error`) | `IUnitInfo` program lists, `IProgramListData::getProgramData`, program-change parameter, `IMidiMapping` program change; `.vstpreset` files |
+| Audio input (effects) | `audio-ports` input port, `clap_audio_buffer` inputs | input bus arrangement, `ProcessData::inputs` |
+| Editor (capture only) | `gui` extension: `create(api, floating)`, `set_parent`, `show`; host `gui` callbacks | `IEditController::createView("editor")`, `IPlugView::attached` with `IPlugFrame`; Linux host `IRunLoop` |
 | Kind | note input + audio output = instrument; audio in+out = effect | event input bus + audio output = instrument; audio in+out = effect; class subcategories as a hint |
 
 Rules for the VST3 backend:
@@ -75,8 +82,10 @@ start/stop-processing calls on the render thread.
 
 Many plugins (JUCE-based ones in particular, in either format) expect a **running message loop on the
 main thread** for timers and async updates. The worker's main thread therefore pumps a minimal loop
-between jobs (Win32 message pump, macOS run loop, a poll loop on Linux). No window is created. A plugin
-that blocks waiting for a dialog or window is caught by the watchdog (05 §1).
+between jobs (Win32 message pump, macOS run loop, a poll loop on Linux). No window is created, except
+by `capture` (06 §6), which opens the plugin's editor in a native top-level window of the worker
+(X11, Win32, Cocoa; plan OQ12): the supervisor never loads the plugin or its editor. A plugin that blocks
+waiting for a dialog or window is caught by the watchdog (05 §1).
 
 ## 4. Parameters
 
@@ -95,7 +104,8 @@ Rules:
 
 ## 5. Render loop
 
-A **render job** = full parameter vector + note plan + sample rate + block size.
+A **render job** = full parameter vector + note plan + sample rate + block size, plus an input signal for
+effects (fed from the first block after settle; output is shifted back by the reported latency) [A].
 
 ```
 reset instance (clean state, 05 §5)
@@ -134,6 +144,25 @@ what *is* portable is the parameter-level match, which is what the optimizer pro
 
 Preset sources for `transfer`: CLAP preset-load/discovery, VST3 program lists and `.vstpreset`
 files, plain state files, or a folder of any of these.
+
+**Applying a preset** [A] is a separate job type, run only by `harvest`, `capture` and source
+preparation, never inside a fit (05 §9). `apply_preset(ref)` loads by the method the ref names, pumps
+the main thread until the plugin reports it is done (CLAP `loaded`, VST3 `restartComponent` or a settle
+timeout), and returns a **captured preset**: `save_state()` plus every parameter's coordinate read back,
+and a name when the plugin has one. Methods per format, in the order the harvest ladder tries them
+(06 §6):
+
+| Method | CLAP | VST3 |
+| --- | --- | --- |
+| State file | `state.load` of a file blob | `.vstpreset` chunks into `IComponent::setState` + controller |
+| Plugin presets | preset-discovery providers → locations (file / plugin) + load keys → `preset-load.from_location` [S: CLAP] | `IProgramListData::getProgramData` per program when `programDataSupported` [S: VST3 SDK] |
+| Program list | — | `IUnitInfo` list and names; set the program-change parameter to `index / (count − 1)` |
+| Program change | MIDI program change on a note port with the MIDI dialect | `IMidiMapping::getMidiControllerAssignment(kCtrlProgramChange)` → parameter |
+| Heuristic | stepped parameter named Program / Preset / Patch (§2) | same |
+| Manual | editor; the user picks the preset | same |
+
+A source render then uses `Job.state` instead of `coords`: reset, `load_state(blob)`, settle, notes or
+input. It still starts from a complete state after a reset (CLAUDE.md rule 5).
 
 ## 8. Build
 

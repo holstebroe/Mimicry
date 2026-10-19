@@ -24,6 +24,16 @@ osc: osc, wave, pitch, tune, detune, unison, sub, noise; filter: cutoff, freq, r
 lpf/hpf; env: attack, decay, sustain, release, adsr, env amt; lfo: lfo, rate, depth, mod; fx: reverb,
 delay, chorus, mix, wet, feedback, size; amp: volume, gain, level, pan.
 
+**Roles** [A] sit below the groups and name what a parameter does, independent of the plugin:
+`cutoff, resonance, filter_env_amount, filter_key_track, filter_type, attack, decay, sustain, release,
+osc_wave, osc_level, detune, coarse_tune, fine_tune, unison, noise_level, lfo_rate, lfo_depth, drive,
+mix, feedback, time, size, damping, threshold, ratio, makeup, eq_freq, eq_gain, eq_q, volume, pan`.
+A role is guessed from name tokens, units and value text (a "Hz" range from about 20 Hz to 20 kHz on a
+filter-like name is `cutoff`) and **confirmed by the probe**: a cutoff moves the centroid smoothly and
+roughly log-linearly, a release changes only the decay after note-off, an attack only the onset slope,
+a mix crossfades with the dry input. A measured signature that contradicts the name drops the role's
+confidence. Roles drive the parameter map (§8), the doctor report (08) and the stage order.
+
 Names are **priors only**. The probe (§3) measures what each parameter does, and a measured signature
 overrides a name guess. Names help most for ordering stages and for the first sigma. Pitch-only
 parameters are pinned when S0 applies the target's pitch (§9).
@@ -42,6 +52,11 @@ parameters are pinned when S0 applies the target's pitch (§9).
    treated as separable (fitted independently in stages); others stay in one stage.
 
 Cost: about `5·n + pair probes` renders, a few minutes for a 100-parameter synth. Cached in the profile.
+
+**Effects** [A]: the probe renders the effect probe signals (06 §5) instead of notes and records effect
+features: band gains and tilt of the response, THD at two levels, output level at stepped input levels
+(dynamics), tail length, modulation rate and depth, self-noise. A parameter that changes nothing for any
+signal is dead.
 
 ## 4. Pipeline
 
@@ -98,9 +113,20 @@ current loss scale [D]. It prefers the simpler of two equally good presets and k
 
 ## 8. Plugin-to-plugin mapping [A]
 
-After >= 50 solved (source params → target params) pairs, fit per target parameter a small monotone
-model from the most correlated source parameter(s). Used as the warm start for the next presets and
-exportable as `knob_map.json` (the cutoff law between two synths, in effect).
+**Map without fitting** (`mimicry map --source A --target B`): both plugins are probed (or their
+profiles read), and each target parameter is matched to the source parameter(s) with the same role and
+the closest probe signature (the feature-delta curves of §3, compared after normalising each feature).
+Where both value texts carry a unit (a cutoff in Hz, an attack in ms), the law is exact: read the
+source value as text and invert the target's value text to get the target coordinate. Otherwise the
+law is the monotone curve that aligns the two signature curves. Links can be many-to-one (a source
+macro driving three target parameters) or one-to-many and are reported as such, not forced into pairs.
+Every entry carries a confidence (role confidence × signature similarity), and unmatched parameters on
+either side are listed.
+
+**Learned map**: after >= 50 solved (source params → target params) pairs, fit per target parameter a
+small monotone model from the most correlated source parameter(s), starting from the map above. Both
+are used as the warm start for the next presets and exported as `knob_map.json` (the cutoff law
+between two synths, in effect), together with each side's mapping to roles.
 
 ## 9. Implementation details (WP3)
 

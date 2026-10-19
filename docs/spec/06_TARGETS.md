@@ -26,9 +26,11 @@ it a file is treated as one event.
 same format on both sides. The source is only ever *rendered*, so its format affects nothing else, and
 the target's parameters are searched in that format's own coordinate (02 §1).
 
-**Source presets** come from state files, CLAP preset-load/discovery, VST3 program lists and
-`.vstpreset` files, or a folder of any of these; `--all` iterates every factory preset the source
-exposes.
+**Source presets** come from the harvest library (§6): state files, CLAP preset-load/discovery, VST3
+program lists and `.vstpreset` files, a folder of any of these, or presets captured by hand; `--all`
+iterates every preset the harvest found. Each is a verified state blob, and the source renders from it
+(02 §7). The source may be an instrument or an effect; an effect source renders the effect probe
+signals (§5) instead of the note plan.
 
 **Probe plan** [D]: a set of renders that makes parameters identifiable, where one note would not:
 
@@ -96,14 +98,91 @@ TB-303 are this case [S].
 
 ## 5. Effects (audio in, audio out) [A]
 
-Effect plugins need an input signal. Three cases:
+Effect plugins need an input signal. Four cases:
 
 | Case | Input | Target |
 | --- | --- | --- |
 | Reamp | the user's dry WAV | the user's processed WAV (best case: exact) |
-| Known source | a built-in signal (pink noise burst, sine sweep, impulse, saw, drum loop) | processed version of the same signal |
+| Known source | the built-in probe signals below | processed version of the same signals |
+| Effect to effect | the built-in probe signals | the source effect's output for each signal (§2) |
 | Unknown dry | none | statistics only (tail length, spectral tilt, modulation depth): weak, flagged |
+
+**Probe signals** [D], generated in code (no audio assets), deterministic, each chosen for what it
+reveals:
+
+| Signal | Reveals |
+| --- | --- |
+| Impulse (plus silence for the tail) | linear response, reverb and delay tails |
+| Log sine sweep 20 Hz-20 kHz, 4 s | frequency response; harmonic distortion separated by the sweep's timing |
+| Sine 1 kHz and 100 Hz at stepped levels (-48 to 0 dBFS in 6 dB steps) | distortion against drive, compressor curve, gating |
+| Level step (-30 to -6 dBFS) on a sustained tone | attack and release of dynamics |
+| Sustained saw chord, 4 s | chorus, phaser, flanger, tremolo rate and depth |
+| Pink noise bursts (short and long) | time-varying filters, envelope followers |
+| Synthetic drum hit and a short loop (kick, snare, hats from noise and sines) | transient handling, a musical check for the ear (`ab.wav`) |
+| Silence | self-noise, hum, self-oscillation, drones |
+
+The default effect plan (`plans/effect_default.json`) uses a subset (impulse, sweep, two sine levels,
+chord, drum loop) and holds out one level and one signal for the holdout check (07 §2); the full set is
+for the probe (04 §3) and the doctor (08). Signals are rendered at the input level the plan states, so
+a level-dependent effect is fitted at the levels it will see.
 
 Tail length (reverb, delay) comes from the plugin's tail report (CLAP `clap.tail`, VST3
 `getTailSamples`) and from the target's decay, and long tails make renders slow, so effect stages are
-last (04 §4).
+last (04 §4). The plugin's reported latency is removed from the output before scoring (02 §5).
+
+## 6. Preset harvest (`mimicry harvest`, `mimicry capture`) [A]
+
+There is no common standard for how a plugin stores or changes presets, and no guarantee that it
+supports program changes at all. The harvest therefore tries the common methods in order, verifies
+each loaded preset, reports what failed, and falls back to the user picking presets by hand.
+
+**Ladder** (02 §7 for the calls). Each step runs until it yields presets; `--method` forces one:
+
+1. Preset files the user names (`--from <file or folder>`): `.vstpreset`, CLAP state files,
+   `params.json`.
+2. The plugin's own catalogue: CLAP preset discovery + preset-load; VST3 `IProgramListData`.
+3. VST3 program lists through the program-change parameter.
+4. MIDI program change (CLAP MIDI on a note port; VST3 `IMidiMapping`), banks of 128 with bank select
+   when the plugin maps it.
+5. Heuristic: a stepped parameter named Program / Preset / Patch, stepped through its values.
+6. Manual capture (below).
+
+**Verification** of every preset (a failed preset load is information, CLAUDE.md rule 6): the state
+hash differs from the defaults and from the previous preset; the render (note probe plan, or effect
+probe signals) differs from the default render by more than the repeatability floor; two renders after
+`load_state` agree within the floor (the blob alone reproduces the sound). Outcomes per preset:
+`ok`, `no-change`, `duplicate` (same state hash or same render as an earlier preset), `not-reproducible`,
+`load-error`, `timeout`. A method whose first presets are all `no-change` is abandoned and the report
+says so.
+
+**Manual capture** (`mimicry capture <plugin>`): the worker opens the plugin's editor in its own window
+(02 §3); the user browses presets in the plugin's own browser; a key or the small capture window saves
+the current state, parameter snapshot and a name (the plugin's program name when it has one, else typed
+or `capture-NNN`, plan OQ14). **Watch mode** (`--watch`) captures by itself when the plugin signals a
+preset change: a burst of parameter changes within 50 ms [D], a VST3 `restartComponent` with
+`kParamValuesChanged`, a CLAP parameter rescan of values, or a changed state hash polled every 500 ms
+[D] for plugins whose presets change hidden state only (plan OQ13). Each capture is verified and
+deduplicated as above, so the user can click through a whole bank with the plugin's own "next" arrow.
+
+**Recipe**: the method that worked, with its details (program-change parameter id and count, MIDI bank
+layout, wait times), is stored in the plugin profile (01 §7), so the next harvest of the same plugin
+goes straight to it. Recipes are plain JSON and can be shared. Learning the editor's own "next preset"
+click and replaying it (plan WP7.5) would close the loop for plugins with no other method.
+
+**Output**: `presets/<format>-<uid>-<hash>/` holds, per preset, `NNN-<name>.state`,
+`NNN-<name>.params.json`, and an `index.json` (name, method, ref, state hash, outcome), plus
+`harvest-report.csv`. Nothing is written into the plugin's own preset folders (05 §8).
+
+## 7. Least-error transfer [A]
+
+The end goal of plugin-to-plugin work is to use the presets of one synth or effect on another with the
+least error the target allows. Rules:
+
+- Each preset's result is judged against the target's repeatability floor and the source's: fit loss,
+  holdout loss, and per-feature errors (what is missing: brightness, envelope, a modulation, a tail).
+- A preset that stays above 1.5x the floor after the full pipeline is reported as **unmatched**, with
+  the feature that dominates the residual as the likely reason (§2).
+- `transfer --source A --target B --target C` ranks candidate targets for a source bank by median and
+  worst loss, so the user can choose the plugin that covers the bank best.
+- Results carry the source preset's name, and the map (04 §8) learned over the bank is written with
+  them.
