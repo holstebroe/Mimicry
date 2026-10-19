@@ -1,12 +1,14 @@
 // Tests for WP3 that need no plugin: CMA-ES and sep-CMA-ES on known functions (T5, docs/spec/
 // 07_OUTPUT_VALIDATION.md), the Jacobi eigensolver, sampling, semantics, the encoding, the surrogate, the
-// profile and fingerprint files, the embedding, and the pipeline on a synthetic objective with a planted
-// crash region.
+// profile and fingerprint files, the embedding, failure bisection and the constraint store (T8 without a
+// plugin), and the pipeline on a synthetic objective with a planted crash region.
 
+#include <algorithm>
 #include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <filesystem>
+#include <format>
 #include <numbers>
 #include <string>
 #include <thread>
@@ -16,6 +18,7 @@
 #include "core/ParamSemantics.hpp"
 #include "core/Rng.hpp"
 #include "core/Sampling.hpp"
+#include "opt/Constraints.hpp"
 #include "opt/Embedding.hpp"
 #include "opt/Fingerprint.hpp"
 #include "opt/Pipeline.hpp"
@@ -436,6 +439,90 @@ void test_embedding() {
     check(silent.size() == kEmbeddingDims && std::isfinite(embedding_distance(a, silent)), "embedding of silence");
 }
 
+// Spec 05 section 4: ddmin finds the minimal failing set, bisection the thresholds; a different failure
+// (NonFinite) in other parameters does not count as the same failure.
+void test_constraints() {
+    auto fn = [](const std::vector<double>& x) {
+        if (x[2] > 0.8 && x[5] > 0.9) return Outcome::Crash;
+        if (x[7] > 0.95) return Outcome::NonFinite;
+        return Outcome::Ok;
+    };
+    long calls = 0;
+    OutcomeBatch test = [&](const std::vector<std::vector<double>>& vs) {
+        std::vector<Outcome> out;
+        for (const auto& v : vs) out.push_back(fn(v));
+        calls += long(vs.size());
+        return out;
+    };
+    const std::vector<double> good(8, 0.3);
+    std::vector<double> bad(8, 0.97);
+    bad[0] = 0.3;  // unchanged: not part of the search
+    const auto r = bisect_failure(test, good, bad, Outcome::Crash);
+    check(r.reproduced && r.minimal == std::vector<std::size_t>{2, 5}, "bisect: minimal set {2, 5}");
+    check(r.threshold.size() == 2 && std::abs(r.threshold[0] - 0.8) < 0.005 && std::abs(r.threshold[1] - 0.9) < 0.005,
+          "bisect: thresholds within 0.5 % (" + (r.threshold.size() == 2 ? std::to_string(r.threshold[0]) + ", " + std::to_string(r.threshold[1]) : std::string()) + ")");
+    check(r.renders == calls && r.renders < 80, "bisect: a handful of renders (" + std::to_string(r.renders) + ")");
+    check(!bisect_failure(test, bad, good, Outcome::Crash).reproduced, "bisect: a failing good vector is no reference");
+    check(!bisect_failure(test, good, bad, Outcome::Timeout).reproduced, "bisect: another outcome does not reproduce");
+
+    std::vector<host::ParamDesc> ps;
+    for (std::uint32_t i = 0; i < 8; ++i) ps.push_back(param(100 + i, "P" + std::to_string(i)));
+    auto c = make_constraint(r, bad, Outcome::Crash, ps);
+    check(c.bounds.size() == 2 && c.bounds[0].id == 102 && c.bounds[1].name == "P5" && c.bounds[0].hi == 1.0,
+          "constraint: ids, names, box to the edge on the failing side");
+    auto inside = good;
+    inside[2] = 0.85;
+    inside[5] = 0.95;
+    auto outside = inside;
+    outside[5] = 0.85;
+    check(c.contains(inside) && !c.contains(outside) && c.contains(bad), "constraint: geometric test");
+    check(c.describe().find("P2 >= 0.80") != std::string::npos, "constraint: description " + c.describe());
+
+    ConstraintSet set(ps);
+    set.add(c);
+    set.add(c);  // the same region again: merged, counted
+    check(set.constraints().size() == 1 && set.constraints()[0].count == 2, "constraint set: merge of the same region");
+    check(set.find(inside) && !set.find(outside), "constraint set: find");
+    check(set.observe_failure(inside, Outcome::Crash) && set.constraints()[0].count == 3, "constraint set: a failure inside counts");
+    check(!set.observe_failure(outside, Outcome::Crash), "constraint set: a failure outside is new");
+    // A valid render inside shrinks the box past it; the witness (the bisected failure) stays inside.
+    auto valid = good;
+    valid[2] = 0.99;
+    valid[5] = 0.91;
+    check(set.observe_valid(valid) == 1 && !set.find(valid) && set.find(bad), "constraint set: shrink past a valid point");
+    check(set.constraints()[0].contradicted == 1 && set.constraints()[0].confidence() < 0.75, "constraint set: confidence falls");
+    // The failing point itself valid: the constraint is dropped.
+    auto witness = good;
+    witness[2] = bad[2];
+    witness[5] = bad[5];
+    set.observe_valid(witness);
+    check(set.empty() && set.dropped() == 1, "constraint set: dropped when its witness renders valid");
+
+    // JSON round trip; a renamed parameter makes a stored constraint inapplicable (rule 7).
+    auto js = ConstraintSet::to_json({c});
+    auto back = ConstraintSet::from_json(json::parse(js.dump()).value());
+    check(back && back->size() == 1 && (*back)[0].bounds.size() == 2 && std::abs((*back)[0].bounds[1].lo - c.bounds[1].lo) < 1e-12,
+          "constraint json round trip");
+    ConstraintSet fresh(ps);
+    check(back && fresh.adopt(*back) == 1 && fresh.find(inside), "constraint set: adopt by id + name");
+    auto renamed = ps;
+    renamed[5].name = "P5 renamed";
+    ConstraintSet other(renamed);
+    check(back && other.adopt(*back) == 0, "constraint set: a renamed parameter is not matched");
+    std::reverse(ps.begin(), ps.end());  // a different table order resolves to new indices
+    ConstraintSet moved(ps);
+    auto rev = inside;
+    std::reverse(rev.begin(), rev.end());
+    check(back && moved.adopt(*back) == 1 && moved.find(rev) && !moved.find(inside), "constraint set: indices resolved per table");
+
+    Profile prof;
+    prof.uid = "x";
+    prof.constraints = {c};
+    auto pb = Profile::from_json(prof.to_json());
+    check(pb && pb->constraints.size() == 1 && !pb->probed() && pb->constraints[0].outcome == Outcome::Crash,
+          "profile: constraints round trip");
+}
+
 // Synthetic objective: a quadratic bowl around `target` (dB-like), a categorical that must match, and a
 // planted crash region (first two parameters both high), as the test synth's A/B hazard.
 class Synthetic final : public Objective {
@@ -506,6 +593,37 @@ void test_pipeline() {
     for (std::size_t i = 0; i < r.top_k.size(); ++i)
         for (std::size_t j = i + 1; j < r.top_k.size(); ++j)
             check(space.distance(r.top_k[i].coords, r.top_k[j].coords) >= po.diversity_param, "pipeline: top-K are diverse");
+
+    // The same run learning constraints (spec 05 sections 3-4): the planted region is bisected, later samples
+    // inside it are redrawn, and fewer candidates crash.
+    // The optimum sits next to the corner, so a search without constraints keeps sampling into it.
+    auto corner = target;
+    corner[1] = 0.87;
+    Synthetic nobj(corner, 7, 2.0 / 3.0), cobj(corner, 7, 2.0 / 3.0);
+    po.log = nullptr;
+    po.max_evals = 3000;
+    const auto nr = run_pipeline(nobj, space, po);
+    ConstraintSet learned(ps);
+    po.constraints = &learned;
+    const auto cr = run_pipeline(cobj, space, po);
+    po.constraints = nullptr;
+    const long crashes = nr.outcomes.count(Outcome::Crash) ? nr.outcomes.at(Outcome::Crash) : 0;
+    const long ccrashes = cr.outcomes.count(Outcome::Crash) ? cr.outcomes.at(Outcome::Crash) : 0;
+    bool planted = false;
+    for (const auto& k : learned.constraints()) {
+        bool a = false, b = false;
+        for (const auto& bd : k.bounds) {
+            a = a || (bd.id == 10 && std::abs(bd.lo - 0.9) < 0.01);
+            b = b || (bd.id == 11 && std::abs(bd.lo - 0.9) < 0.01);
+        }
+        planted = planted || (a && b && k.bounds.size() == 2);
+    }
+    check(!cr.learned.empty() && planted, "pipeline: the planted crash region is learned");
+    std::printf("constraints: crashes %ld -> %ld, %ld redrawn, %ld skipped, %d bisections (%ld renders)\n", crashes, ccrashes,
+                cr.resampled, cr.skipped, cr.bisections, cr.bisect_renders);
+    check(cr.resampled + cr.skipped > 0 && ccrashes < crashes,
+          std::format("pipeline: constraints avoid crashes ({} -> {}, {} redrawn, {} skipped)", crashes, ccrashes, cr.resampled, cr.skipped));
+    check(cr.best.eval.loss < 0.2, "pipeline with constraints still converges (loss " + std::to_string(cr.best.eval.loss) + ")");
 
     // Unsupervised: no group stages.
     SpaceOptions uo;
@@ -587,6 +705,7 @@ int main() {
     test_profile_and_fingerprint();
     test_probe_safe_box();
     test_embedding();
+    test_constraints();
     test_pipeline();
     if (failures) {
         std::fprintf(stderr, "%d failure(s)\n", failures);

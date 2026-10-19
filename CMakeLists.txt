@@ -123,6 +123,7 @@ endif()
 # Optimizer (docs/spec/04_OPTIMIZER.md): encoding, probe, pipeline, fingerprints, surrogate. Sees only the
 # format-agnostic host interface (PluginHost.hpp); renders go through a RenderBatch (a worker pool).
 add_library(mimicry_opt STATIC
+    src/opt/Constraints.cpp
     src/opt/Embedding.cpp
     src/opt/Fingerprint.cpp
     src/opt/Objective.cpp

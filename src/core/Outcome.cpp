@@ -16,6 +16,12 @@ std::string_view to_string(Outcome outcome) noexcept {
     return "Unknown";
 }
 
+Outcome parse_outcome(std::string_view text) noexcept {
+    for (int o = 0; o <= int(Outcome::Crash); ++o)
+        if (to_string(Outcome(o)) == text) return Outcome(o);
+    return Outcome::HostError;
+}
+
 int severity(Outcome outcome) noexcept {
     switch (outcome) {
         case Outcome::Ok: return 0;

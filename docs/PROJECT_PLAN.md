@@ -104,9 +104,9 @@ build/mimicry fit --plugin path/to/plugin.vst3 --wav target.wav --minutes 20
 ### WP4 — Resilience (spec 05)
 | ID | Issue | Status |
 | --- | --- | --- |
-| 4.1 | Ranking of invalid candidates, resample, sigma adaptation | 🟡 ranking (severity, then distance to the best valid point) and sigma shrink + recentre in `Pipeline` (WP3); resampling against learned constraints needs 4.3 |
-| 4.2 | Safe box from probe | 🟡 probe shortens each range to the last good probe value; `Space` clips to it. Joint (multi-parameter) safety is 4.3 |
-| 4.3 | Failure bisection and constraint store | ⬜ |
+| 4.1 | Ranking of invalid candidates, resample, sigma adaptation | ✅ ranking (severity, then distance to the best valid point) and sigma shrink + recentre in `Pipeline` (WP3); CMA-ES samples inside a known constraint redrawn up to 5 times, S1 points inside one skipped (WP4.3) |
+| 4.2 | Safe box from probe | ✅ probe shortens each range to the last good probe value; `Space` clips to it. Joint (multi-parameter) safety comes from the learned constraints (4.3) |
+| 4.3 | Failure bisection and constraint store | ✅ `opt/Constraints`: reproduce, ddmin, batched threshold search, box regions keyed on id + name, merge, shrink/drop on contradiction, JSON; `Objective::outcomes` (cached, unscored renders); the pipeline bisects up to 6 new failures per run against its best point; constraints stored in the profile by `fit`, kept by `probe`, listed in `result.json`. T8 passes in both formats (`fit_clap`, `fit_vst3`); on the synthetic objective constraints cut crashes 183 → 2. Half-space regions not implemented |
 | 4.4 | State reset, canary, instance recycling (both formats) | ⬜ |
 | 4.5 | Failure reports and `mimicry replay` | ⬜ |
 | 4.6 | Format-specific handling (05 §9): GUI-expecting VST3 plugins, restart requests, exceptions | ⬜ |
@@ -203,6 +203,7 @@ built and tested against both formats from the start.
 
 ## Progress log
 
+- 2026-10-19: WP4.3 failure bisection and constraint store (`opt/Constraints`), which also completes 4.1 (resample against constraints) and 4.2 (joint safety). T8 added to `fit_clap`/`fit_vst3`; constraint unit checks and a pipeline-with-constraints case in `opt`. `parse_outcome` moved to `core/Outcome`. Spec 05 §3-§4, §7 and spec 01 §5 updated.
 - 2026-10-19: OQ12 resolved (editors Windows only), OQ14 resolved (names from CLAP discovery / `preset-load.loaded`, VST3 program names, file names, else defaults); preset folders added to the harvest ladder; taught "next preset" click moved from WP7.5 to WP5.12 (Windows). Specs 01, 02, 05, 06 updated.
 - 2026-10-19: Use cases checked against the plan and written in (use-case table): preset harvesting (WP1.11, 1.12, 5.8-5.10, 7.5), parameter roles and maps (WP3.9, 5.4a/b), effects (WP1.10, 3.10, 5.7), least-error transfer (5.11), diagnosis report (WP8, new spec 08), tests T17-T20 (6.7), OQ12-OQ15. Specs 01-07 updated, spec 08 added. Planning only, no code.
 - 2026-10-19: WP3 review fixes: seeds (fingerprint neighbours, warm starts) are conformed to the space, so `--fix`, pinned pitch and grid steps hold; probe safe box narrowed when the value next to the default fails; S5 restarts never reuse a start; the surrogate trains only on points that agree with the run's held parameters; top-K embeddings come from one cached render (`Objective::embed`) and failures are counted; `fit` asks `value_text` through `WorkerPool::value_text` on a pool thread; CMA-ES restart policy shared (`cma_restart_options`, `cma_should_restart`), one per-plugin file naming rule (`plugin_file_path`), one grid snap (`snap_to_grid`), `Space::sample_box` for S1 and fingerprints. New unit checks in `opt`. All 11 ctest tests pass.

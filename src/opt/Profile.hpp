@@ -15,6 +15,7 @@
 #include "core/Outcome.hpp"
 #include "core/ParamSemantics.hpp"
 #include "host/PluginHost.hpp"
+#include "opt/Constraints.hpp"
 
 namespace mimicry::opt {
 
@@ -55,6 +56,10 @@ struct Profile {
     double render_ms = 0;         // mean wall time per render during the probe
     std::vector<ParamProfile> params;
     std::vector<PairProfile> pairs;
+    std::vector<Constraint> constraints;  // learned by failure bisection (spec 05 section 4), kept by `probe`
+
+    // False for a profile that only carries constraints (written by a fit before any probe).
+    [[nodiscard]] bool probed() const noexcept { return !params.empty(); }
 
     // Entry for this parameter, only when both id and name match.
     [[nodiscard]] const ParamProfile* find(const host::ParamDesc& p) const;

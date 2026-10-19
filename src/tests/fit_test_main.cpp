@@ -1,6 +1,6 @@
 // Optimizer against a real plugin (WP3): the probe classifies mimicry_test_synth's parameters and finds its
 // safe box, the profile round-trips, the pipeline recovers a preset of the plugin's own (a small T6) and the
-// fingerprint database seeds from the right neighbourhood. Renders go through a worker pool, as in
+// fingerprint database seeds from the right neighbourhood; failure bisection finds the planted crash (T8). Renders go through a worker pool, as in
 // production (CLAUDE.md rule 4). Usage: mimicry_fit_test <plugin> <mimicry_worker>.
 
 #include <cmath>
@@ -12,6 +12,7 @@
 
 #include "features/Loss.hpp"
 #include "host/ParamUtil.hpp"
+#include "opt/Constraints.hpp"
 #include "opt/Fingerprint.hpp"
 #include "opt/Objective.hpp"
 #include "opt/Pipeline.hpp"
@@ -101,6 +102,46 @@ int main(int argc, char** argv) {
     const auto* hang = entry(*prof, ts::kHazHang);
     check(hang && hang->outcomes.back() == Outcome::Timeout && hang->safe_hi == 0.75, "probe: the hang hazard is a timeout");
     check(!prof->pairs.empty(), "probe: pair interactions measured");
+
+    // --- T8: bisection finds the planted crash {Hazard A > 0.8, Hazard B > 0.9} within 2 % (spec 05 section 4) ---
+    {
+        std::vector<double> good;
+        for (const auto& q : params) good.push_back(q.default_coord);
+        auto bad = good;
+        bad[ts::kHazA] = 0.95;
+        bad[ts::kHazB] = 0.97;
+        bad[ts::kWave] = 1.0;  // harmless changes ddmin must drop
+        bad[ts::kCutoff] = 0.3;
+        bad[ts::kSustain] = 0.4;
+        bad[ts::kDecay] = 0.6;
+        OutcomeBatch test = [&](const std::vector<std::vector<double>>& vs) {
+            std::vector<host::Job> jobs;
+            for (const auto& v : vs) {
+                host::Job j = job;
+                j.coords = v;
+                jobs.push_back(std::move(j));
+            }
+            std::vector<Outcome> out;
+            for (const auto& r : render(jobs)) out.push_back(r ? Outcome::Ok : r.error());
+            return out;
+        };
+        const auto r = bisect_failure(test, good, bad, Outcome::Crash);
+        std::string found;
+        for (std::size_t k = 0; k < r.minimal.size(); ++k)
+            found += std::format(" {}={:.4f}", params[r.minimal[k]].name, k < r.threshold.size() ? r.threshold[k] : -1.0);
+        std::printf("T8: reproduced %d, minimal set:%s (%ld renders)\n", int(r.reproduced), found.c_str(), r.renders);
+        const bool pair = r.minimal.size() == 2 && r.minimal[0] == ts::kHazA && r.minimal[1] == ts::kHazB;
+        check(r.reproduced && pair, "T8: minimal failing set is {Hazard A, Hazard B}");
+        check(pair && std::abs(r.threshold[0] - 0.8) < 0.02 && std::abs(r.threshold[1] - 0.9) < 0.02, "T8: thresholds within 2 %");
+        if (pair) {
+            ConstraintSet set(params);
+            set.add(make_constraint(r, bad, Outcome::Crash, params));
+            auto in = good, out = good;
+            in[ts::kHazA] = 0.85, in[ts::kHazB] = 0.93;
+            out[ts::kHazA] = 0.85, out[ts::kHazB] = 0.85;
+            check(set.find(in) && !set.find(out), "T8: the stored region rejects the crash corner only");
+        }
+    }
 
     const auto dir = std::filesystem::temp_directory_path() / ("mimicry_fit_test_" + std::string(host::to_string(info.format)));
     std::filesystem::create_directories(dir);

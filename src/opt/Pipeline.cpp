@@ -60,6 +60,12 @@ private:
     // candidates with fitness = loss + boundary + prior for valid ones and +inf for invalid ones.
     std::vector<Candidate> evaluate(const std::vector<std::vector<double>>& coords, const std::vector<double>& penalty = {});
     void note_progress(const std::string& stage);
+    // Feeds outcomes to the constraint set and bisects new failures against the best valid point (spec 05
+    // section 4).
+    void learn(const std::vector<Candidate>& cands);
+    [[nodiscard]] bool forbidden(const std::vector<double>& coords) const {
+        return opt_.constraints && opt_.constraints->find(coords);
+    }
 
     // One CMA-ES run over `free` from `start` with restarts (spec 04 section 5). Returns its best.
     Candidate run_cma(const std::string& name, const std::vector<std::size_t>& free, const Candidate& start,
@@ -130,8 +136,40 @@ std::vector<Candidate> Runner::evaluate(const std::vector<std::vector<double>>& 
         }
     }
     res_.evals += long(coords.size());
+    learn(out);
     note_progress(stage_);
     return out;
+}
+
+void Runner::learn(const std::vector<Candidate>& cands) {
+    if (!opt_.constraints) return;
+    ConstraintSet& set = *opt_.constraints;
+    std::vector<const Candidate*> fresh;
+    for (const auto& c : cands) {
+        if (c.eval.ok()) set.observe_valid(c.coords);
+        else if (c.eval.outcome != Outcome::Silent && !set.observe_failure(c.coords, c.eval.outcome))
+            fresh.push_back(&c);  // Silent is the plugin muted, not a hazard [D]
+    }
+    if (!std::isfinite(best_.eval.loss)) return;  // no good point to bisect against
+    for (const auto* c : fresh) {
+        if (res_.bisections >= opt_.max_bisections || global_stop()) break;
+        if (set.find(c->coords)) continue;  // covered by a constraint learned from an earlier one
+        ++res_.bisections;
+        const auto r = bisect_failure([this](const auto& vs) { return obj_.outcomes(vs); }, best_.coords, c->coords,
+                                      c->eval.outcome, opt_.bisect);
+        res_.bisect_renders += r.renders;
+        if (!r.reproduced || r.minimal.empty()) {
+            if (opt_.log)
+                opt_.log(std::format("{}: {} did not reproduce against the best point; no constraint", stage_,
+                                     to_string(c->eval.outcome)));
+            continue;
+        }
+        auto con = make_constraint(r, c->coords, c->eval.outcome, space_.params());
+        if (opt_.log)
+            opt_.log(std::format("{}: learned {} ({} renders)", stage_, con.describe(), r.renders));
+        res_.learned.push_back(con);
+        set.add(std::move(con));
+    }
 }
 
 void Runner::note_progress(const std::string& stage) {
@@ -199,7 +237,17 @@ Candidate Runner::run_cma(const std::string& name, const std::vector<std::size_t
             }
             std::vector<std::vector<double>> coords(xs.size(), run_best.coords);
             std::vector<double> pen(xs.size());
-            for (std::size_t i = 0; i < xs.size(); ++i) pen[i] = space_.decode(free, xs[i], coords[i]);
+            for (std::size_t i = 0; i < xs.size(); ++i) {
+                pen[i] = space_.decode(free, xs[i], coords[i]);
+                // Resample first (spec 05 section 3): a sample inside a known constraint is redrawn, up to
+                // `resample` times, before it is rendered as a probable failure.
+                for (int k = 0; k < opt_.resample && forbidden(coords[i]); ++k) {
+                    xs[i] = cma.ask(1).front();
+                    coords[i] = run_best.coords;
+                    pen[i] = space_.decode(free, xs[i], coords[i]);
+                    ++res_.resampled;
+                }
+            }
             auto cands = evaluate(coords, pen);
 
             // Rank invalid candidates behind the valid ones: by severity, then by distance to the run's best
@@ -247,7 +295,11 @@ void Runner::stage_seed() {
     if (opt_.max_evals > 0) n = std::min(n, std::max(1L, opt_.max_evals / 4));
     const auto lhs = latin_hypercube(std::size_t(std::max(0L, n)), active.size(), rng_);
     std::vector<std::vector<double>> pts;
-    for (const auto& u : lhs) pts.push_back(space_.sample_box(u, rng_));
+    for (const auto& u : lhs) {
+        auto x = space_.sample_box(u, rng_);
+        if (forbidden(x)) ++res_.skipped;  // a known hazard: not worth a render
+        else pts.push_back(std::move(x));
+    }
     const std::size_t batch = 64;
     std::vector<Candidate> all;
     for (std::size_t i = 0; i < pts.size() && !global_stop(); i += batch) {

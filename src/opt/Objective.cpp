@@ -135,9 +135,10 @@ std::vector<Evaluation> AudioObjective::evaluate(const std::vector<std::vector<d
     return out;
 }
 
-std::vector<Evaluation> AudioObjective::embed(const std::vector<std::vector<double>>& coords) {
+std::vector<std::shared_ptr<const host::Audio>> AudioObjective::render_cached(const std::vector<std::vector<double>>& coords,
+                                                                             std::vector<Evaluation>& out) {
     const std::size_t n = coords.size();
-    std::vector<Evaluation> out(n);
+    out.assign(n, Evaluation{});
     std::vector<std::shared_ptr<const host::Audio>> audio(n);
     std::vector<host::Job> jobs;
     std::vector<std::pair<std::size_t, std::string>> owners;  // candidate, cache key
@@ -167,10 +168,26 @@ std::vector<Evaluation> AudioObjective::embed(const std::vector<std::vector<doub
             cache_.insert(key, std::move(c));
         }
     }
+    for (std::size_t i = 0; i < n; ++i)
+        if (out[i].outcome == Outcome::Ok && !audio[i]) out[i].outcome = Outcome::HostError;
+    return audio;
+}
+
+std::vector<Outcome> AudioObjective::outcomes(const std::vector<std::vector<double>>& coords) {
+    std::vector<Evaluation> evals;
+    (void)render_cached(coords, evals);
+    std::vector<Outcome> out;
+    for (const auto& e : evals) out.push_back(e.outcome);
+    return out;
+}
+
+std::vector<Evaluation> AudioObjective::embed(const std::vector<std::vector<double>>& coords) {
+    const std::size_t n = coords.size();
+    std::vector<Evaluation> out;
+    const auto audio = render_cached(coords, out);
     std::atomic<std::size_t> next{0};
     auto work = [&](std::size_t t) {
         for (std::size_t i = next++; i < n; i = next++) {
-            if (out[i].outcome == Outcome::Ok && !audio[i]) out[i].outcome = Outcome::HostError;
             if (out[i].ok()) out[i].embedding = embedders_[t]->embed(mono_of(*audio[i]));
         }
     };

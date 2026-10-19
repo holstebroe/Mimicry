@@ -48,12 +48,6 @@ Response parse_response(std::string_view s) {
     return s == "log" ? Response::Log : s == "exp" ? Response::Exp : Response::Linear;
 }
 
-Outcome parse_outcome(std::string_view s) {
-    for (int o = 0; o <= int(Outcome::Crash); ++o)
-        if (to_string(Outcome(o)) == s) return Outcome(o);
-    return Outcome::HostError;
-}
-
 }  // namespace
 
 const ParamProfile* Profile::find(const host::ParamDesc& p) const {
@@ -110,6 +104,7 @@ json::Value Profile::to_json() const {
         pr.push_back(std::move(e));
     }
     v.set("pairs", json::Value(std::move(pr)));
+    v.set("constraints", ConstraintSet::to_json(constraints));
     return v;
 }
 
@@ -152,6 +147,9 @@ expected<Profile, std::string> Profile::from_json(const json::Value& v) {
         q.separable = e["separable"].as_bool(true);
         p.pairs.push_back(q);
     }
+    auto cs = ConstraintSet::from_json(v["constraints"]);
+    if (!cs) return unexpected("profile: " + cs.error());
+    p.constraints = std::move(*cs);
     return p;
 }
 

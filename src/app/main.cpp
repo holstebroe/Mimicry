@@ -271,6 +271,7 @@ int cmd_probe(const Args& a) {
     out += std::format("floor {:.3f} dB, {:.1f} ms per render, {} pairs probed, {} interact\n", prof->floor_db,
                        prof->render_ms, prof->pairs.size(), joined);
     const auto path = opt::Profile::default_path(profiles_dir(a), p.info);
+    if (const auto old = load_profile(a, p.info)) prof->constraints = old->constraints;  // learned by earlier fits
     if (auto r = prof->save(path); !r) return fail("probe", r.error());
     out += "wrote " + path.string() + "\n";
     std::fputs(out.c_str(), stdout);
@@ -283,7 +284,8 @@ int cmd_fingerprint(const Args& a) {
     if (!plugin) return fail("fingerprint", plugin.error());
     auto& p = **plugin;
     const auto profile = load_profile(a, p.info);
-    if (!profile) std::fputs("note: no profile; run `mimicry probe` first for a safe box and dead parameters\n", stderr);
+    if (!profile || !profile->probed())
+        std::fputs("note: no profile; run `mimicry probe` first for a safe box and dead parameters\n", stderr);
     const auto space = opt::Space::build(p.params, p.info.format, profile ? &*profile : nullptr, opt::SpaceOptions{});
     opt::FingerprintOptions fo;
     int key = 48;
@@ -355,8 +357,15 @@ int cmd_fit(const Args& a) {
     auto plugin = open_plugin(plugin_path, a);
     if (!plugin) return fail("fit", plugin.error());
     auto& p = **plugin;
-    const auto profile = load_profile(a, p.info);
+    const auto stored = load_profile(a, p.info);
+    // A profile written by an earlier fit before any probe carries only constraints.
+    const auto profile = stored && stored->probed() ? stored : std::nullopt;
     if (!profile) std::fputs("note: no plugin profile; `mimicry probe` first makes the fit faster and safer\n", stderr);
+    opt::ConstraintSet constraints(p.params);
+    if (stored) {
+        const auto n = constraints.adopt(stored->constraints);
+        if (n) std::fputs(std::format("profile: {} hazard constraint(s)\n", n).c_str(), stdout);
+    }
 
     // S0: the target's pitch is applied to the note (spec 04 section 4), so pitch-only parameters are pinned.
     const bool pitched = an.f0 > 0 && an.kind == features::SampleKind::Note;
@@ -400,6 +409,7 @@ int cmd_fit(const Args& a) {
     po.top_k = int(a.num("--top-k", po.top_k));
     po.seed = std::uint64_t(a.num("--seed", 1));
     po.prior = !a.has("--no-prior");
+    po.constraints = &constraints;
     for (const auto& s : split(a.get("--stages"))) po.stages.push_back(std::atoi(s.c_str()));
     po.log = [](const std::string& s) { std::fputs((s + "\n").c_str(), stdout); };
     po.progress = [](const opt::Progress& pr) {
@@ -409,6 +419,20 @@ int cmd_fit(const Args& a) {
                            host::to_string(p.info.format), p.info.name, space.active().size(), space.categorical().size(),
                            p.workers(), to_string(so.mode)).c_str(), stdout);
     const auto res = opt::run_pipeline(obj, space, po, seeds);
+    // Learned and updated constraints go back into the profile (spec 05 section 4), even when the fit failed.
+    if (!constraints.empty() || (stored && !stored->constraints.empty())) {
+        opt::Profile out = stored ? *stored : opt::Profile{};
+        if (!stored) {
+            out.format = p.info.format;
+            out.uid = p.info.uid;
+            out.name = p.info.name;
+            out.vendor = p.info.vendor;
+            out.version_hash = p.info.version_hash;
+        }
+        out.constraints = constraints.constraints();
+        const auto path = opt::Profile::default_path(profiles_dir(a), p.info);
+        if (auto r = out.save(path); !r) std::fputs(std::format("note: {}\n", r.error()).c_str(), stderr);
+    }
     if (!res.best.eval.ok()) return fail("fit", "no valid candidate was found");
 
     // Run directory (spec 07 section 1).
@@ -497,6 +521,15 @@ int cmd_fit(const Args& a) {
     json::Object outcomes;
     for (const auto& [o, n] : res.outcomes) outcomes[std::string(to_string(o))] = static_cast<std::int64_t>(n);
     result.set("outcomes", json::Value(std::move(outcomes)));
+    json::Value hz;
+    hz.set("learned", opt::ConstraintSet::to_json(res.learned));
+    hz.set("known", static_cast<std::int64_t>(constraints.constraints().size()));
+    hz.set("dropped", constraints.dropped());
+    hz.set("bisections", res.bisections);
+    hz.set("bisect_renders", static_cast<std::int64_t>(res.bisect_renders));
+    hz.set("resampled", static_cast<std::int64_t>(res.resampled));
+    hz.set("skipped", static_cast<std::int64_t>(res.skipped));
+    result.set("constraints", std::move(hz));
     json::Array topk;
     for (const auto& t : res.top_k) topk.push_back(t.eval.loss);
     result.set("top_k_loss_db", json::Value(std::move(topk)));
@@ -508,6 +541,10 @@ int cmd_fit(const Args& a) {
         summary += std::format("  {:<26} {:3} free  {:8.3f} -> {:8.3f} dB  {:6} evals\n", s.name, s.free, s.before, s.after, s.evals);
     for (const auto& [o, n] : res.outcomes)
         if (o != Outcome::Ok) summary += std::format("  {} {} candidate(s)\n", n, to_string(o));
+    for (const auto& c : res.learned) summary += "  learned: " + c.describe() + "\n";
+    if (res.resampled + res.skipped > 0)
+        summary += std::format("  {} sample(s) redrawn and {} seed point(s) skipped inside known constraints\n",
+                               res.resampled, res.skipped);
     summary += "wrote " + dir.string() + " (listen to ab.wav)\n";
     std::fputs(summary.c_str(), stdout);
     return 0;
