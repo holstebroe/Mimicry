@@ -80,6 +80,69 @@ Descriptor describe(const std::vector<float>& mono, int rate, Embedder& embedder
     return d;
 }
 
+SettleResult measure_settle(const RenderBatch& render, host::Job base, const std::vector<host::ParamDesc>& params,
+                            const Profile& profile) {
+    static constexpr double kSettles[] = {5, 25, 50, 100, 200, 400, 800, 1600, 3200};  // ms [D]
+    SettleResult out;
+    auto coords = base.coords;
+    if (coords.size() != params.size()) {
+        coords.clear();
+        for (const auto& p : params) coords.push_back(std::clamp(p.default_coord, 0.0, 1.0));
+    }
+    int stepped = 0;
+    for (std::size_t i = 0; i < params.size(); ++i) {
+        const auto* e = profile.find(params[i]);
+        if (!e || e->dead() || e->measured == ProbeClass::Pitch || params[i].steps != 0) continue;
+        const double u = coords[i] > 0.5 ? 0.25 : 0.75;
+        coords[i] = std::clamp(u, e->safe_lo, e->safe_hi);
+        ++stepped;
+    }
+    if (stepped == 0) {
+        out.note = "no continuous parameter to step";
+        return out;
+    }
+    std::vector<host::Job> jobs;
+    for (double ms : kSettles) {
+        host::Job j = base;
+        j.coords = coords;
+        j.settle_ms = ms;
+        jobs.push_back(std::move(j));
+    }
+    auto got = render(jobs);
+    got.resize(jobs.size(), unexpected(Outcome::HostError));
+    if (!got.back()) {
+        out.note = std::format("the stepped parameters do not render ({})", to_string(got.back().error()));
+        return out;
+    }
+    const auto ref = mono_of(*got.back());
+    const bool deterministic = profile.floor_db <= 1e-6;
+    Embedder embedder(base.sample_rate);
+    const auto ref_emb = deterministic ? Embedding{} : embedder.embed(ref);
+    for (std::size_t k = 0; k < jobs.size(); ++k) {
+        if (!got[k]) continue;
+        const auto m = mono_of(*got[k]);
+        bool same = false;
+        if (deterministic) {
+            const std::size_t n = std::min(m.size(), ref.size());
+            double d = 0, r = 0;
+            for (std::size_t i = 0; i < n; ++i) {
+                d += (double(m[i]) - ref[i]) * (double(m[i]) - ref[i]);
+                r += double(ref[i]) * ref[i];
+            }
+            same = r > 0 && std::sqrt(d / r) < 0.01;
+        } else {
+            same = embedding_distance(embedder.embed(m), ref_emb) < std::max(2.0 * profile.embedding_floor, 0.15);
+        }
+        if (same) {
+            out.settle_ms = kSettles[k];
+            return out;
+        }
+    }
+    out.note = "no settle time up to 3.2 s matched";
+    out.settle_ms = kSettles[std::size(kSettles) - 1];
+    return out;
+}
+
 expected<Profile, std::string> probe(const RenderBatch& render, const host::PluginInfo& info,
                                      const std::vector<host::ParamDesc>& params, const ProbeOptions& options) {
     auto log = [&](const std::string& s) {
@@ -285,6 +348,13 @@ expected<Profile, std::string> probe(const RenderBatch& render, const host::Plug
     log(std::format("pitch: {}{}", to_string(prof.pitch.method),
                     prof.pitch.method == PitchMethod::Bend ? std::format(" (range {:.2f} semitones)", prof.pitch.bend_range)
                                                            : prof.pitch.note.empty() ? std::string() : " (" + prof.pitch.note + ")"));
+    // 7. Settle time (spec 05 section 6).
+    const auto st = measure_settle([&](const std::vector<host::Job>& jobs) { return run(jobs); }, job_at(defaults), params, prof);
+    prof.settle_ms = st.settle_ms;
+    log(std::format("settle: {}", st.settle_ms > 0 ? std::format("{:.0f} ms", st.settle_ms) : "unknown (" + st.note + ")"));
+    if (st.settle_ms * 1.5 > options.job.settle_ms)
+        log(std::format("note: the probe rendered with {:.0f} ms of settle; {:.0f} ms would be safer (--settle-ms)",
+                        options.job.settle_ms, st.settle_ms * 1.5));
     prof.render_ms = renders ? 1000.0 * render_s / double(renders) : 0.0;
     return prof;
 }

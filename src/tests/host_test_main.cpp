@@ -1,5 +1,5 @@
-// Host tests against mimicry_test_synth (in-process, for debugging the backend; T1-T3, T9 and parts of
-// T13/T16 of docs/spec/07_OUTPUT_VALIDATION.md). Usage: mimicry_host_test <plugin.clap|plugin.vst3>.
+// Host tests against mimicry_test_synth (in-process, for debugging the backend; T1-T3, T9, T13 and T16 of
+// docs/spec/07_OUTPUT_VALIDATION.md: restart handling, program-change pinning, offline mode, tuning cents). Usage: mimicry_host_test <plugin.clap|plugin.vst3>.
 
 #include <algorithm>
 #include <cmath>
@@ -193,6 +193,15 @@ void test_pinning(Instance& inst) {
     check(a && ref && a->samples == ref->samples, "pinned parameters do not change the sound");
 }
 
+// T16: the host renders in offline mode (VST3 kOffline, which clap-wrapper passes on as CLAP_RENDER_OFFLINE;
+// CLAP through the render extension). The synth's Require Offline switch outputs NaN otherwise.
+void test_offline(Instance& inst) {
+    auto job = make_job(inst);
+    job.coords[index_of(inst, ts::kRequireOffline)] = 1.0;
+    auto r = inst.render(job);
+    check(r.has_value(), "T16: offline render mode is set (" + std::string(r ? "Ok" : to_string(r.error())) + ")");
+}
+
 void test_restart_and_state(Instance& inst, const std::string& path) {
     auto job = make_job(inst);
     set_plain(inst, job.coords, ts::kRestart, 1.0);
@@ -266,6 +275,7 @@ int main(int argc, char** argv) {
     test_repeatability(**inst);
     test_failures(**inst);
     test_pinning(**inst);
+    test_offline(**inst);
     test_restart_and_state(**inst, path);
 
     if (argc >= 3) {

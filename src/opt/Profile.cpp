@@ -76,6 +76,7 @@ json::Value Profile::to_json() const {
     v.set("floor_db", floor_db);
     v.set("embedding_floor", embedding_floor);
     v.set("render_ms", render_ms);
+    v.set("settle_ms", settle_ms);
     json::Array ps;
     for (const auto& p : params) {
         json::Value e;
@@ -129,6 +130,7 @@ expected<Profile, std::string> Profile::from_json(const json::Value& v) {
     p.floor_db = v["floor_db"].as_number();
     p.embedding_floor = v["embedding_floor"].as_number();
     p.render_ms = v["render_ms"].as_number();
+    p.settle_ms = v["settle_ms"].as_number();
     for (const auto& e : v["params"].as_array()) {
         ParamProfile q;
         q.id = static_cast<std::uint32_t>(e["id"].as_number());

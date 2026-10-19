@@ -127,7 +127,9 @@ tail:     keep processing until output is below -80 dBFS for 200 ms, or tail_max
 Defaults [D]: sample rate 48 kHz (or the target's), block 512 frames, `settle_ms` 250 (`--settle-ms`;
 1200 for plugins that smooth slowly), `tail_max` 8 s. VST3 is set up in **offline processing mode**,
 which some plugins use to switch to higher-quality paths: this is deliberate and reported in the run
-report (the sound can differ slightly from realtime mode).
+report (the sound can differ slightly from realtime mode). CLAP plugins with the `render` extension are
+set to `CLAP_RENDER_OFFLINE` before activation for the same reason (unless they report a hard realtime
+requirement), so the two formats render alike [A].
 
 Pitch: a note carries a key plus an optional **tuning offset in cents**: VST3 `tuning` natively, CLAP
 note-expression TUNING when supported, else MIDI pitch bend with a measured range (a calibration render

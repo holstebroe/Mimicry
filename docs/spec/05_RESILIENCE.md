@@ -110,6 +110,14 @@ so smoothers converge (Acidus sends its CCs 1.2 s before the note for the same r
 measures the plugin's actual settle time by stepping one parameter and watching convergence; the
 profile stores it.
 
+Implemented [A]: the probe steps every continuous parameter it found alive (pitch class excepted) at once
+to its far quarter point (0.25 or 0.75, inside the safe box), renders that job with settle times of 5, 25,
+50, 100, 200, 400, 800, 1600 and 3200 ms, and takes the shortest whose audio matches the 3.2 s render:
+within 1 % RMS for a deterministic plugin (repeatability floor 0), within `max(2 · embedding floor,
+0.15)` otherwise [D]. All parameters move together so whichever one smooths is caught. `fit` renders
+with 1.5 × the measured time when that is longer than the default 250 ms [D]; `--settle-ms` decides
+outright (also for `probe`, which warns when its own settle was shorter than 1.5 × the measurement).
+
 ## 7. Failure reports
 
 Each distinct failure writes `crashes/<plugin>-<hash>.json` with the format, plugin uid and version

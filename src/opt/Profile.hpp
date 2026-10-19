@@ -55,6 +55,7 @@ struct Profile {
     double floor_db = 0;          // repeatability floor (spec 03 section 6)
     double embedding_floor = 0;   // embedding distance between two renders of the defaults
     double render_ms = 0;         // mean wall time per render during the probe
+    double settle_ms = 0;         // measured settle time (spec 05 section 6), 0 = unknown
     std::vector<ParamProfile> params;
     std::vector<PairProfile> pairs;
     std::vector<Constraint> constraints;  // learned by failure bisection (spec 05 section 4), kept by `probe`

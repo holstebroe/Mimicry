@@ -210,6 +210,13 @@ uint32_t tail_get(const clap_plugin_t* plugin) {
 }
 const clap_plugin_tail_t kTail = {tail_get};
 
+bool render_hard_realtime(const clap_plugin_t*) { return false; }
+bool render_set(const clap_plugin_t* plugin, clap_plugin_render_mode mode) {
+    self(plugin)->synth.set_offline(mode == CLAP_RENDER_OFFLINE);
+    return true;
+}
+const clap_plugin_render_t kRender = {render_hard_realtime, render_set};
+
 uint32_t latency_get(const clap_plugin_t*) { return 0; }
 const clap_plugin_latency_t kLatency = {latency_get};
 
@@ -289,6 +296,7 @@ const void* plugin_get_extension(const clap_plugin_t*, const char* id) {
     if (!std::strcmp(id, CLAP_EXT_STATE)) return &kState;
     if (!std::strcmp(id, CLAP_EXT_TAIL)) return &kTail;
     if (!std::strcmp(id, CLAP_EXT_LATENCY)) return &kLatency;
+    if (!std::strcmp(id, CLAP_EXT_RENDER)) return &kRender;
     if (!std::strcmp(id, kPluginAsVst3)) return &kAsVst3;
     return nullptr;
 }

@@ -93,6 +93,10 @@ public:
         latency_ = static_cast<const clap_plugin_latency_t*>(plugin_->get_extension(plugin_, CLAP_EXT_LATENCY));
         audio_ports_ = static_cast<const clap_plugin_audio_ports_t*>(plugin_->get_extension(plugin_, CLAP_EXT_AUDIO_PORTS));
         note_ports_ = static_cast<const clap_plugin_note_ports_t*>(plugin_->get_extension(plugin_, CLAP_EXT_NOTE_PORTS));
+        // Offline rendering, as the VST3 backend's kOffline (spec 02 section 5): main thread, before activation.
+        if (const auto* render = static_cast<const clap_plugin_render_t*>(plugin_->get_extension(plugin_, CLAP_EXT_RENDER));
+            render && render->set && !(render->has_hard_realtime_requirement && render->has_hard_realtime_requirement(plugin_)))
+            offline_ = render->set(plugin_, CLAP_RENDER_OFFLINE);
 
         info_.format = PluginFormat::Clap;
         info_.uid = chosen->id;
@@ -454,6 +458,7 @@ private:
     std::unordered_map<std::uint32_t, std::size_t> index_;
     std::vector<int> in_channels_, out_channels_;
     bool clap_dialect_ = true;
+    bool offline_ = false;  // the plugin accepted CLAP_RENDER_OFFLINE
     bool midi_dialect_ = false;
 
     int rate_ = 48000;

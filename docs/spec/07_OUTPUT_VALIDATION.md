@@ -68,7 +68,7 @@ All tests are executables run by `ctest`; DSP-style tests return non-zero on fai
 | T13 | **Backend equivalence**: `mimicry_test_synth` as CLAP and as VST3 gives the same parameters (ids, names, units) and renders within the repeatability floor for the same musical settings |
 | T14 | `.vstpreset` round trip: write, load back through the VST3 backend, render, equal to the original render; SDK validator passes on `mimicry_test_synth_vst3` |
 | T15 | **Cross-format transfer**: Acidus as CLAP source, `acidus_vst3` as target (the same engine through the wrapper): the optimizer recovers the source parameters within tolerance, and the reverse |
-| T16 | VST3 hosting specifics: restart request handling, program-change pinning, offline mode set, tuning cents honoured on `NoteOnEvent` |
+| T16 | VST3 hosting specifics: restart request handling, program-change pinning, offline mode set, tuning cents honoured on `NoteOnEvent` (run for both formats in `host_*`; table changes after a restart in `worker_*`) |
 | T17 | **Harvest**: the test synth's factory presets found and loaded through CLAP preset discovery, VST3 program data, the VST3 program list and MIDI program change; every preset `ok`, the planted duplicate and the planted no-op preset reported as such; the recipe is stored and reused; source renders from the captured state equal renders from the preset's parameters |
 | T18 | **Effects**: `mimicry_test_fx` (CLAP and VST3) renders the probe signals with input and latency compensation in both formats; reamp fit and effect-to-effect transfer recover random presets within 1.5x the floor; effect features pass their T4 cases |
 | T19 | **Map**: test synth CLAP → test synth VST3 maps every parameter to itself with full confidence; against a renamed and re-tapered variant, roles and laws are recovered within tolerance |
@@ -89,7 +89,10 @@ Throw* (`process` throws a C++ exception) and the hidden *Hazard Rename* (rename
 for a parameter rescan, so the parameter table changes mid-run). They are appended to the table, so no
 earlier id moves. For pitch (02 §5) it takes MIDI pitch bend on a note port with the MIDI dialect, and two
 hidden parameters: *Ignore Tuning* (tuning has no effect, so only bend moves the pitch) and *Bend Range*
-(1-24 semitones, default 2) [A]. The VST3 build therefore carries clap-wrapper's MIDI-mapping proxies (left
+(1-24 semitones, default 2) [A]. A hidden *Require Offline* switch outputs NaN unless the host set
+offline rendering (CLAP `render` extension, VST3 `kOffline` passed on by clap-wrapper): T16's "offline
+mode set" check [A]. A hidden *Smoothing* parameter (ms, default 0) glides Level and Cutoff from their
+defaults with a one-pole after every activation, for the settle-time probe (05 §6) [A]. The VST3 build therefore carries clap-wrapper's MIDI-mapping proxies (left
 out of the table, 02 §4) and its MIDI program-change parameter (pinned, never sent).
 
 For T17 it exposes a small factory bank (CLAP preset discovery, VST3 program list with program data,

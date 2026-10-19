@@ -18,6 +18,11 @@
 //   ignore_tuning >= 0.5       note tuning (CLAP note expression, VST3 NoteOnEvent.tuning) is ignored, so only
 //                              MIDI pitch bend moves the pitch (spec 02 section 5 calibration). Hidden
 //   bend_range                 pitch-bend range in semitones (default 2). Hidden
+//   require_offline >= 0.5     output turns NaN unless the host set offline rendering (CLAP render extension,
+//                              VST3 kOffline through clap-wrapper): T16 "offline mode set". Hidden
+//   smoothing  (ms)            one-pole glide of Level and Cutoff from their defaults after (re)activation,
+//                              like a parameter smoother; 0 = none (default). The settle-time probe (spec 05
+//                              section 6) must measure it. Hidden
 
 #include <algorithm>
 #include <array>
@@ -60,6 +65,8 @@ enum ParamId : std::uint32_t {
     kHazRename,  // hidden
     kIgnoreTuning,  // hidden
     kBendRange,     // hidden
+    kRequireOffline,  // hidden
+    kSmoothing,       // hidden
     kParamCount
 };
 
@@ -105,6 +112,8 @@ inline constexpr ParamInfo kParams[kParamCount] = {
     {kHazRename, "Hazard Rename", "Hazards", "", 0, 1, 0, false, true, false, false, Scale::Linear},
     {kIgnoreTuning, "Ignore Tuning", "Global", "", 0, 1, 0, true, true, false, false, Scale::Linear},
     {kBendRange, "Bend Range", "Global", "", 1, 24, 2, true, true, false, false, Scale::Linear},
+    {kRequireOffline, "Require Offline", "Global", "", 0, 1, 0, true, true, false, false, Scale::Linear},
+    {kSmoothing, "Smoothing", "Global", "ms", 0, 2000, 0, false, true, false, false, Scale::Linear},
 };
 
 inline constexpr const char* kRenamedHidden = "Hidden Drive (renamed)";
@@ -129,6 +138,8 @@ public:
         for (auto& v : voices_) v = Voice{};
         poisoned_ = false;
         bend_ = 0;
+        sm_level_ = kParams[kLevel].def;  // a smoother starts from the plugin's initial values
+        sm_cutoff_ = kParams[kCutoff].def;
         for (std::uint32_t i = 0; i < kParamCount; ++i) values_[i] = kParams[i].def;
         rate_ = rate_ > 0 ? rate_ : 48000.0;
     }
@@ -194,6 +205,9 @@ public:
         }
     }
 
+    // The host's render mode (CLAP render extension).
+    void set_offline(bool offline) { offline_ = offline; }
+
     // MIDI pitch bend, -1..1 of the bend range (channel-wide).
     void pitch_bend(double amount) { bend_ = std::clamp(amount, -1.0, 1.0); }
 
@@ -230,11 +244,13 @@ public:
         if (values_[kHazSticky] > 0.9) stuck_ = true;
         if (values_[kHazThrow] > 0.9) throw std::runtime_error("planted exception");
 
-        const double level = std::pow(10.0, values_[kLevel] / 20.0);
-        const bool nan_out = values_[kHazNan] > 0.9;
+        double level = std::pow(10.0, values_[kLevel] / 20.0);
+        const bool nan_out = values_[kHazNan] > 0.9 || (values_[kRequireOffline] >= 0.5 && !offline_);
         const bool bypass = values_[kBypass] >= 0.5;
         const double cutoff = values_[kCutoff];
-        const double g = 1.0 - std::exp(-2.0 * 3.141592653589793 * std::min(cutoff, rate_ * 0.45) / rate_);
+        double g = 1.0 - std::exp(-2.0 * 3.141592653589793 * std::min(cutoff, rate_ * 0.45) / rate_);
+        const double smooth_ms = values_[kSmoothing];
+        const double smooth_a = smooth_ms > 0 ? 1.0 - std::exp(-1000.0 / (smooth_ms * rate_)) : 1.0;
         const double a_inc = 1.0 / std::max(1.0, values_[kAttack] * 0.001 * rate_);
         const double d_dec = (1.0 - values_[kSustain] / 100.0) / std::max(1.0, values_[kDecay] * 0.001 * rate_);
         const double sustain = values_[kSustain] / 100.0;
@@ -243,6 +259,12 @@ public:
         double peak = 0;
 
         for (int n = 0; n < frames; ++n) {
+            if (smooth_ms > 0) {  // per-sample glide of level (dB) and cutoff (Hz, in log)
+                sm_level_ += smooth_a * (values_[kLevel] - sm_level_);
+                sm_cutoff_ *= std::pow(cutoff / sm_cutoff_, smooth_a);
+                level = std::pow(10.0, sm_level_ / 20.0);
+                g = 1.0 - std::exp(-2.0 * 3.141592653589793 * std::min(sm_cutoff_, rate_ * 0.45) / rate_);
+            }
             double mix = 0;
             for (auto& v : voices_) {
                 if (!v.active) continue;
@@ -299,6 +321,8 @@ private:
     bool stuck_ = false;    // never cleared: only a new instance is clean
     bool renamed_ = false;  // follows kHazRename, not part of the DSP state
     double bend_ = 0;
+    bool offline_ = false;  // host render mode: not DSP state, survives reset
+    double sm_level_ = 0, sm_cutoff_ = 1000;  // smoother state (kSmoothing)
 };
 
 }  // namespace mimicry::testsynth

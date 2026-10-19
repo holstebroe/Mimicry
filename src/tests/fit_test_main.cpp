@@ -107,6 +107,17 @@ int main(int argc, char** argv) {
     const auto* hang = entry(*prof, ts::kHazHang);
     check(hang && hang->outcomes.back() == Outcome::Timeout && hang->safe_hi == 0.75, "probe: the hang hazard is a timeout");
     check(!prof->pairs.empty(), "probe: pair interactions measured");
+    // Spec 05 section 6: no smoother settles at once; a 100 ms one-pole glide needs roughly half a second.
+    check(prof->settle_ms > 0 && prof->settle_ms <= 25, std::format("settle without smoothing: {:.0f} ms", prof->settle_ms));
+    {
+        host::Job sj = job;
+        for (const auto& q : params) sj.coords.push_back(q.default_coord);
+        sj.coords[ts::kSmoothing] = info.format == host::PluginFormat::Clap ? host::plain_to_coord(params[ts::kSmoothing], 100.0)
+                                                                            : 100.0 / 2000.0;
+        const auto st = measure_settle(render, sj, params, *prof);
+        std::printf("settle with a 100 ms smoother: %.0f ms %s\n", st.settle_ms, st.note.c_str());
+        check(st.settle_ms >= 400 && st.settle_ms <= 1600, std::format("settle with a 100 ms smoother: {:.0f} ms", st.settle_ms));
+    }
     check(prof->pitch.method == PitchMethod::Tuning && std::abs(prof->pitch.tuning_cents - 50) < 3,
           std::format("probe: the plugin takes tuning ({} {:.1f} cents)", to_string(prof->pitch.method), prof->pitch.tuning_cents));
     {

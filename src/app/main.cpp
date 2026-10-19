@@ -70,6 +70,7 @@ common options:
   --no-isolation       render in this process (debugging only)
   --profiles DIR       plugin profiles and fingerprint databases (default: profiles)
   --note C3            target pitch override; --gate MS note length
+  --settle-ms MS       silence after the parameters, before the notes (default 250, or the profile's)
 
 fit options:
   --minutes M          time cap (default 20)        --patience S   seconds without improvement (240)
@@ -256,6 +257,7 @@ int cmd_probe(const Args& a) {
     }
     opt::ProbeOptions po;
     po.job = note_job(a, key, 0, 800);
+    po.job.settle_ms = a.num("--settle-ms", po.job.settle_ms);
     po.job.tail_max_ms = 3000;
     po.pairs = !a.has("--no-pairs");
     po.log = [](const std::string& s) { std::fputs((s + "\n").c_str(), stdout); };
@@ -378,6 +380,10 @@ int cmd_fit(const Args& a) {
     const bool pitched = an.f0 > 0 && an.kind == features::SampleKind::Note;
     host::Job job = note_job(a, pitched ? an.key : 60, pitched ? an.cents : 0.0, std::max(50.0, an.duration_ms));
     job.sample_rate = ao.sample_rate;
+    // Settle (spec 05 section 6): 1.5 x the probe's measurement when that is longer than the default [D];
+    // --settle-ms decides outright.
+    if (profile && profile->settle_ms * 1.5 > job.settle_ms) job.settle_ms = profile->settle_ms * 1.5;
+    job.settle_ms = a.num("--settle-ms", job.settle_ms);
     opt::SpaceOptions so;
     const std::string mode = a.get("--mode", "hybrid");
     so.mode = mode == "guided" ? opt::Mode::Guided : mode == "unsupervised" ? opt::Mode::Unsupervised : opt::Mode::Hybrid;
