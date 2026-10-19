@@ -35,6 +35,11 @@ public:
     virtual ~Objective() = default;
     [[nodiscard]] virtual std::vector<Evaluation> evaluate(const std::vector<std::vector<double>>& coords,
                                                            bool embed = false) = 0;
+    // Embeddings of already scored vectors (top-K diversity): outcome and embedding only, one render each
+    // (cached when possible), never the repeats of a noisy plugin, and not counted as candidates.
+    [[nodiscard]] virtual std::vector<Evaluation> embed(const std::vector<std::vector<double>>& coords) {
+        return evaluate(coords, true);
+    }
     // Mean wall time of one candidate (render + score) so far; decides the surrogate (spec 04 section 7).
     [[nodiscard]] virtual double seconds_per_candidate() const { return 0; }
 };
@@ -53,6 +58,7 @@ public:
                    features::ScorerOptions options = {}, int threads = 1, std::size_t cache_bytes = std::size_t{256} << 20);
 
     [[nodiscard]] std::vector<Evaluation> evaluate(const std::vector<std::vector<double>>& coords, bool embed) override;
+    [[nodiscard]] std::vector<Evaluation> embed(const std::vector<std::vector<double>>& coords) override;
     [[nodiscard]] double seconds_per_candidate() const override;
 
     // Renders (cached) one vector; null when the render failed.

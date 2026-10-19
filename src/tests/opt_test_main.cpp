@@ -19,6 +19,7 @@
 #include "opt/Embedding.hpp"
 #include "opt/Fingerprint.hpp"
 #include "opt/Pipeline.hpp"
+#include "opt/Probe.hpp"
 #include "opt/Profile.hpp"
 #include "opt/Space.hpp"
 #include "opt/Surrogate.hpp"
@@ -132,6 +133,15 @@ void test_cma() {
     for (std::size_t i = 0; i < xs.size(); ++i) f[i] = sphere(xs[i]);
     cma.tell({xs.begin(), xs.begin() + 5}, {f.begin(), f.begin() + 5});
     check(cma.generation() == 1 && std::isfinite(cma.sigma()), "CMA-ES tell with a subset");
+
+    // The restart policy the pipeline shares: run 0 as given, then sigma halved, population doubled, cap 64.
+    CmaRunOptions rp;
+    rp.cma.sigma0 = 0.3;
+    rp.cma.seed = 5;
+    const auto r0 = cma_restart_options(rp, 0, 0), r1 = cma_restart_options(rp, 1, 10), r2 = cma_restart_options(rp, 2, 40);
+    check(r0.sigma0 == 0.3 && r0.lambda == 0 && r0.seed == 5, "CMA-ES restart 0 keeps the options");
+    check(std::abs(r1.sigma0 - 0.15) < 1e-15 && r1.lambda == 20 && r1.seed == 5 + 7919u && r2.lambda == 64,
+          "CMA-ES restart: sigma halved, population doubled up to 64");
 }
 
 void test_sampling() {
@@ -269,6 +279,24 @@ void test_space() {
     only.fix = {"13"};
     auto o = Space::build(ps, host::PluginFormat::Clap, nullptr, only);
     check(o.active().size() == 1 && o.active()[0] == 1, "space: --only and --fix");
+    // Vectors from outside the search: fixed parameters back at default, steps on the grid, safe box kept.
+    auto outside = s.defaults();
+    outside[6] = 0.7;                // stepped, 5 values: 0.75
+    outside[7] = 1.0 / 3.0 + 1e-8;   // categorical stored as float32
+    outside[9] = 0.9;                // read-only
+    outside[10] = 0.4;               // seed (pinned)
+    outside[2] = std::nan("");
+    const auto conf = s.conform(outside);
+    check(std::abs(conf[6] - 0.75) < 1e-12 && conf[7] == 1.0 / 3.0 && conf[9] == s.defaults()[9] &&
+              conf[10] == s.defaults()[10] && conf[2] == s.defaults()[2] && conf[0] == outside[0],
+          "space: conform pins fixed parameters and snaps steps");
+    auto boxed = h.defaults();
+    boxed[1] = 0.9;
+    check(std::abs(h.conform(boxed)[1] - 0.75) < 1e-12, "space: conform clips to the safe box");
+    Rng box_rng(3);
+    const auto sb = h.sample_box(std::vector<double>(h.active().size(), 1.0), box_rng);
+    check(std::abs(sb[1] - 0.75) < 1e-12 && sb[4] == h.defaults()[4] && sb[9] == h.defaults()[9],
+          "space: sample_box spans the safe box, fixed at default");
     SpaceOptions uns;
     uns.mode = Mode::Unsupervised;
     check(Space::build(ps, host::PluginFormat::Clap, &prof, uns).slot(1).group == ParamGroup::Unknown, "space: unsupervised has no groups");
@@ -352,6 +380,38 @@ void test_profile_and_fingerprint() {
     pd[1].name = "C";
     check(d2 && !d2->matches(info, pd), "fingerprint rejects a different parameter table");
     std::filesystem::remove_all(dir);
+}
+
+void test_probe_safe_box() {
+    // Two parameters at default 0.45: A crashes at 0.5 (the probe value next to the default), B at 0.
+    std::vector<host::ParamDesc> ps{param(1, "A", 0, 0.45), param(2, "B", 0, 0.45)};
+    const int rate = 48000;
+    RenderBatch render = [&](const std::vector<host::Job>& jobs) {
+        std::vector<expected<host::Audio, Outcome>> out;
+        for (const auto& j : jobs) {
+            if (j.coords[0] == 0.5 || j.coords[1] == 0.0) {
+                out.push_back(unexpected(Outcome::Crash));
+                continue;
+            }
+            host::Audio a{rate, 1, std::vector<float>(std::size_t(rate / 2))};
+            for (std::size_t i = 0; i < a.samples.size(); ++i)
+                a.samples[i] = float(0.3 * std::sin(2 * std::numbers::pi * 220.0 * double(i) / rate));
+            out.push_back(std::move(a));
+        }
+        return out;
+    };
+    ProbeOptions po;
+    po.job.sample_rate = rate;
+    po.pairs = false;
+    host::PluginInfo info;
+    const auto prof = probe(render, info, ps, po);
+    check(prof && prof->params.size() == 2, "probe runs");
+    if (!prof || prof->params.size() != 2) return;
+    const auto& a = prof->params[0];
+    const auto& b = prof->params[1];
+    check(a.safe_lo == 0.0 && a.safe_hi == 0.45, "probe: a failure next to the default narrows that side (" +
+                                                       std::to_string(a.safe_lo) + ", " + std::to_string(a.safe_hi) + ")");
+    check(b.safe_lo == 0.25 && b.safe_hi == 1.0, "probe: safe box cut at the last good value");
 }
 
 void test_embedding() {
@@ -489,6 +549,23 @@ void test_pipeline() {
     check(polish.find("sep-CMA-ES") != std::string::npos, "pipeline: sep-CMA-ES above 64 parameters");
     check(br.best.eval.loss < br.stages.front().after, "pipeline: sep-CMA-ES improves on the seeds");
 
+    // Seeds from outside (a fingerprint built without --fix) cannot move a fixed parameter off its default.
+    SpaceOptions fo;
+    fo.fix = {"12"};  // Attack
+    auto fs = Space::build(ps, host::PluginFormat::Clap, nullptr, fo);
+    auto ftarget = target;
+    ftarget[2] = 0.9;  // the optimum needs Attack off its default, so an unconformed seed would win
+    const auto seed = ftarget;
+    Synthetic fobj(ftarget, 7, 2.0 / 3.0);
+    PipelineOptions fpo;
+    fpo.max_evals = 600;
+    fpo.seed_samples = 40;
+    fpo.prior = false;
+    const auto fr = run_pipeline(fobj, fs, fpo, {seed});
+    bool pinned = fr.best.coords[2] == fs.defaults()[2];
+    for (const auto& c : fr.top_k) pinned = pinned && c.coords[2] == fs.defaults()[2];
+    check(pinned, "pipeline: a seed's fixed parameter is reset to its default");
+
     Synthetic small(target, 7, 2.0 / 3.0);
     PipelineOptions so;
     so.max_evals = 800;
@@ -508,6 +585,7 @@ int main() {
     test_space();
     test_gp();
     test_profile_and_fingerprint();
+    test_probe_safe_box();
     test_embedding();
     test_pipeline();
     if (failures) {

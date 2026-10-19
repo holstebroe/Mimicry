@@ -152,34 +152,41 @@ Candidate Runner::run_cma(const std::string& name, const std::vector<std::size_t
     Candidate run_best = start;
     if (free.empty()) return run_best;
     const std::size_t n = free.size();
-    CmaOptions co;
-    co.sigma0 = sigma0;
-    co.separable = int(n) > opt_.sep_threshold;
-    co.seed = seed;
+    CmaRunOptions ro;  // restart policy and its [S] constants (core/Cma.hpp)
+    ro.cma.sigma0 = sigma0;
+    ro.cma.separable = int(n) > opt_.sep_threshold;
+    ro.cma.seed = seed;
     const bool surrogate = opt_.surrogate_above_s == 0 ||
                            (opt_.surrogate_above_s > 0 && obj_.seconds_per_candidate() > opt_.surrogate_above_s);
     if (surrogate) res_.surrogate_used = true;
-    double sigma = sigma0;
+    // Searched parameters this run holds at run_best's values: the surrogate learns only from archive
+    // points that agree on them, or points differing only there would project onto one x with different y.
+    std::vector<std::size_t> held;
+    for (auto list : {&space_.active(), &space_.categorical()})
+        for (auto i : *list)
+            if (std::find(free.begin(), free.end(), i) == free.end()) held.push_back(i);
     int lambda = 0;
     double last_improve = now();
-    for (int restart = 0; restart < 10 && !stop(budget); ++restart) {
-        co.sigma0 = sigma;
-        co.lambda = lambda;
-        co.seed = seed + std::uint64_t(restart) * 7919u;
-        Cma cma(space_.encode(free, run_best.coords), co);
+    for (int restart = 0; restart <= ro.max_restarts && !stop(budget); ++restart) {
+        Cma cma(space_.encode(free, run_best.coords), cma_restart_options(ro, restart, lambda));
         bool restart_now = false;
         while (!stop(budget) && !restart_now) {
             std::vector<std::vector<double>> xs;
-            if (surrogate && archive_.size() >= std::max<std::size_t>(10, 2 * n + 1)) {
-                // Pre-screen 3 lambda samples by the GP's lower confidence bound (spec 04 section 7).
-                GaussianProcess gp;
-                std::vector<std::vector<double>> gx;
-                std::vector<double> gy;
-                const std::size_t from = archive_.size() > 150 ? archive_.size() - 150 : 0;
-                for (std::size_t i = from; i < archive_.size(); ++i) {
-                    gx.push_back(space_.encode(free, archive_[i].first));
+            std::vector<std::vector<double>> gx;
+            std::vector<double> gy;
+            if (surrogate) {
+                for (std::size_t i = archive_.size(); i-- > 0 && gx.size() < 150;) {
+                    const auto& c = archive_[i].first;
+                    bool same = true;
+                    for (auto h : held) same = same && std::abs(c[h] - run_best.coords[h]) < 1e-9;
+                    if (!same) continue;
+                    gx.push_back(space_.encode(free, c));
                     gy.push_back(archive_[i].second);
                 }
+            }
+            if (surrogate && gx.size() >= std::max<std::size_t>(10, 2 * n + 1)) {
+                // Pre-screen 3 lambda samples by the GP's lower confidence bound (spec 04 section 7).
+                GaussianProcess gp;
                 auto pool = cma.ask(3 * cma.lambda());
                 if (gp.fit(gx, gy)) {
                     for (auto i : prescreen(gp, pool, std::size_t(cma.lambda()))) xs.push_back(pool[i]);
@@ -225,12 +232,10 @@ Candidate Runner::run_cma(const std::string& name, const std::vector<std::size_t
                 if (opt_.log) opt_.log(std::format("{}: no improvement for {:.0f} s, stopping", name, opt_.patience_s));
                 return run_best;
             }
-            restart_now = cma.sigma() < 1e-3 || cma.condition() > 1e12;
+            restart_now = cma_should_restart(cma, ro);
             lambda = cma.lambda();
         }
-        // Restart from the best point, sigma0 halved, population doubled (cap 64) [S].
-        sigma = sigma0 * 0.5;
-        lambda = std::min(64, lambda * 2);
+        // The next run restarts from the best point, sigma0 halved, population doubled (cap 64) [S].
     }
     return run_best;
 }
@@ -242,21 +247,7 @@ void Runner::stage_seed() {
     if (opt_.max_evals > 0) n = std::min(n, std::max(1L, opt_.max_evals / 4));
     const auto lhs = latin_hypercube(std::size_t(std::max(0L, n)), active.size(), rng_);
     std::vector<std::vector<double>> pts;
-    for (const auto& u : lhs) {
-        auto c = space_.defaults();
-        std::vector<double> x(active.size());
-        for (std::size_t k = 0; k < active.size(); ++k) {
-            const auto& s = space_.slot(active[k]);
-            const double lo = space_.to_x(active[k], s.lo), hi = space_.to_x(active[k], s.hi);
-            x[k] = lo + u[k] * (hi - lo);
-        }
-        space_.decode(active, x, c);
-        for (auto ci : space_.categorical()) {
-            const auto vals = space_.values(ci);
-            if (!vals.empty()) c[ci] = vals[rng_.below(vals.size())];
-        }
-        pts.push_back(std::move(c));
-    }
+    for (const auto& u : lhs) pts.push_back(space_.sample_box(u, rng_));
     const std::size_t batch = 64;
     std::vector<Candidate> all;
     for (std::size_t i = 0; i < pts.size() && !global_stop(); i += batch) {
@@ -320,14 +311,16 @@ void Runner::stage_polish() {
     const int R = std::max(1, opt_.restarts);
     const double total = 0.75;  // of what is left; S6 and S7 share the rest
     const Budget all = share(total);
+    std::vector<std::vector<double>> starts;  // where earlier runs began: a seed starts at most one run
     for (int r = 0; r < R && !global_stop(); ++r) {
-        // Run 0 polishes the best so far; the others start from the next distinct S1 seeds.
+        // Run 0 polishes the best so far; the others start from the next S1 seeds no run has used.
         Candidate start = best_;
         double sigma = opt_.sigma_polish;
         if (r > 0 && std::size_t(r) < kept_.size() + 1) {
             for (const auto& k : kept_) {
                 bool used = space_.distance(k.coords, best_.coords) < 0.05;
                 for (const auto& f : finalists_) used = used || space_.distance(k.coords, f.coords) < 0.05;
+                for (const auto& st : starts) used = used || space_.distance(k.coords, st) < 0.05;
                 if (!used) {
                     start = k;
                     sigma = opt_.sigma_stage;
@@ -340,6 +333,7 @@ void Runner::stage_polish() {
         Budget b;
         b.deadline_s = now() + part * (all.deadline_s - now());
         if (all.eval_limit > 0) b.eval_limit = res_.evals + std::max(1L, long(part * double(all.eval_limit - res_.evals)));
+        starts.push_back(start.coords);
         const auto got = run_cma(std::format("S5 run {}", r + 1), active, start, sigma, b, opt_.seed + 5000u + std::uint64_t(r) * 104729u);
         remember(got);
     }
@@ -468,9 +462,17 @@ void Runner::select_top_k() {
     if (finalists_.size() > 24) finalists_.resize(24);
     std::vector<std::vector<double>> coords;
     for (const auto& f : finalists_) coords.push_back(f.coords);
-    // Embeddings for the feature-space test (cached renders; not counted as search evaluations).
-    auto emb = obj_.evaluate(coords, true);
-    for (std::size_t i = 0; i < finalists_.size() && i < emb.size(); ++i) finalists_[i].eval.embedding = std::move(emb[i].embedding);
+    // Embeddings for the feature-space test: one cached render each, not counted as search evaluations;
+    // a render that fails now is still recorded (rule 6).
+    auto emb = obj_.embed(coords);
+    for (std::size_t i = 0; i < finalists_.size() && i < emb.size(); ++i) {
+        if (!emb[i].ok()) {
+            ++res_.outcomes[emb[i].outcome];
+            if (opt_.log) opt_.log(std::format("top-K: finalist {} failed to re-render ({})", i + 1, to_string(emb[i].outcome)));
+            continue;
+        }
+        finalists_[i].eval.embedding = std::move(emb[i].embedding);
+    }
     for (const auto& f : finalists_) {
         if (int(res_.top_k.size()) >= opt_.top_k) break;
         bool distinct = true;
@@ -489,10 +491,11 @@ PipelineResult Runner::run(const std::vector<std::vector<double>>& seeds) {
     best_.fitness = std::numeric_limits<double>::infinity();
     best_.coords = space_.defaults();
     stage_ = "S0";
-    // Defaults and the given seeds (fingerprint neighbours, warm starts) first.
+    // Defaults and the given seeds (fingerprint neighbours, warm starts) first, made points of this space:
+    // fixed parameters (--fix, pinned pitch, ...) at default and steps on their grid.
     std::vector<std::vector<double>> first{space_.defaults()};
     for (const auto& s : seeds)
-        if (s.size() == space_.size()) first.push_back(s);
+        if (s.size() == space_.size()) first.push_back(space_.conform(s));
     auto base = evaluate(first);
     for (std::size_t i = 1; i < base.size(); ++i)
         if (std::isfinite(base[i].fitness)) kept_.push_back(base[i]);

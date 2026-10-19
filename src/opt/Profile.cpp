@@ -175,13 +175,18 @@ expected<Profile, std::string> Profile::load(const std::filesystem::path& path) 
     return from_json(*v);
 }
 
-std::filesystem::path Profile::default_path(const std::filesystem::path& dir, const host::PluginInfo& info) {
+std::filesystem::path plugin_file_path(const std::filesystem::path& dir, const host::PluginInfo& info,
+                                       std::string_view extension) {
     std::string name = std::string(host::to_string(info.format)) + "-" + info.uid + "-" + info.version_hash;
     for (auto& c : name) {
         const unsigned char u = static_cast<unsigned char>(c);
         if (!(std::isalnum(u) || c == '-' || c == '.' || c == '_')) c = '_';
     }
-    return dir / (name + ".json");
+    return dir / (name + std::string(extension));
+}
+
+std::filesystem::path Profile::default_path(const std::filesystem::path& dir, const host::PluginInfo& info) {
+    return plugin_file_path(dir, info, ".json");
 }
 
 }  // namespace mimicry::opt

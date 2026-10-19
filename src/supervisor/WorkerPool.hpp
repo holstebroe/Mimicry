@@ -7,6 +7,7 @@
 // ends, and the next candidate would be scored as a Crash.
 
 #include <condition_variable>
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <thread>
@@ -26,27 +27,31 @@ public:
     WorkerPool& operator=(const WorkerPool&) = delete;
 
     [[nodiscard]] int size() const { return static_cast<int>(clients_.size()); }
-    // Direct access for calls that do not restart a worker (info, parameters); renders go through
-    // render_all so a respawn happens on the client's pool thread.
+    // Direct access for calls that do not restart a worker (info, parameters); renders and value_text go
+    // through the pool so a respawn happens on the client's pool thread.
     [[nodiscard]] WorkerClient& client(int i) { return *clients_[static_cast<std::size_t>(i)]; }
 
     // Renders all jobs, results in job order. A crash or timeout costs only that candidate. One batch at a
     // time; safe to call from any thread.
     [[nodiscard]] std::vector<expected<host::Audio, Outcome>> render_all(const std::vector<host::Job>& jobs);
+    // The plugin's display text for a value, asked on a pool thread (empty when the worker cannot answer).
+    [[nodiscard]] std::string value_text(std::uint32_t id, double coord);
 
     [[nodiscard]] WorkerStats total_stats() const;
 
 private:
     WorkerPool() = default;
     void loop(std::size_t index, std::filesystem::path plugin, std::string uid, WorkerOptions options);
+    // Runs task(client, i) for every i in [0, count) on the pool threads. One batch at a time.
+    void run(std::size_t count, const std::function<void(WorkerClient&, std::size_t)>& task);
 
     std::vector<std::unique_ptr<WorkerClient>> clients_;
     std::vector<std::thread> threads_;
     std::mutex batch_mutex_;  // serialises render_all
     std::mutex mutex_;
     std::condition_variable work_cv_, done_cv_;
-    const std::vector<host::Job>* jobs_ = nullptr;
-    std::vector<expected<host::Audio, Outcome>>* results_ = nullptr;
+    const std::function<void(WorkerClient&, std::size_t)>* task_ = nullptr;
+    std::size_t count_ = 0;
     std::size_t next_ = 0;
     std::uint64_t batch_ = 0;
     int busy_ = 0;

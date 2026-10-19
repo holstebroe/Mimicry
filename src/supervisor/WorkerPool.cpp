@@ -46,15 +46,13 @@ void WorkerPool::loop(std::size_t index, std::filesystem::path plugin, std::stri
         if (quit_) break;
         seen = batch_;
         // No client (open failed, the pool is being torn down), or a late wake-up after the batch ended.
-        if (!client || !jobs_) continue;
+        if (!client || !task_) continue;
         ++busy_;
-        for (;;) {
-            if (next_ >= jobs_->size()) break;
+        while (next_ < count_) {
             const std::size_t i = next_++;
             lock.unlock();
-            auto r = client->render((*jobs_)[i]);
+            (*task_)(*client, i);  // writes only its own result slot
             lock.lock();
-            (*results_)[i] = std::move(r);
         }
         if (--busy_ == 0) done_cv_.notify_all();
     }
@@ -63,21 +61,31 @@ void WorkerPool::loop(std::size_t index, std::filesystem::path plugin, std::stri
     clients_[index].reset();
 }
 
-std::vector<expected<host::Audio, Outcome>> WorkerPool::render_all(const std::vector<host::Job>& jobs) {
-    std::vector<expected<host::Audio, Outcome>> results(jobs.size(), unexpected(Outcome::HostError));
-    if (jobs.empty()) return results;
+void WorkerPool::run(std::size_t count, const std::function<void(WorkerClient&, std::size_t)>& task) {
+    if (count == 0) return;
     std::lock_guard batch_lock(batch_mutex_);
     std::unique_lock lock(mutex_);
-    jobs_ = &jobs;
-    results_ = &results;
+    task_ = &task;
+    count_ = count;
     next_ = 0;
     ++batch_;
     work_cv_.notify_all();
-    // Done when every job was handed out and no thread is still rendering one.
-    done_cv_.wait(lock, [&] { return next_ >= jobs.size() && busy_ == 0; });
-    jobs_ = nullptr;
-    results_ = nullptr;
+    // Done when every task was handed out and no thread is still running one.
+    done_cv_.wait(lock, [&] { return next_ >= count && busy_ == 0; });
+    task_ = nullptr;
+    count_ = 0;
+}
+
+std::vector<expected<host::Audio, Outcome>> WorkerPool::render_all(const std::vector<host::Job>& jobs) {
+    std::vector<expected<host::Audio, Outcome>> results(jobs.size(), unexpected(Outcome::HostError));
+    run(jobs.size(), [&](WorkerClient& c, std::size_t i) { results[i] = c.render(jobs[i]); });
     return results;
+}
+
+std::string WorkerPool::value_text(std::uint32_t id, double coord) {
+    std::string text;
+    run(1, [&](WorkerClient& c, std::size_t) { text = c.value_text(id, coord); });
+    return text;
 }
 
 WorkerStats WorkerPool::total_stats() const {

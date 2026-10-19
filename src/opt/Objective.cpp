@@ -135,4 +135,51 @@ std::vector<Evaluation> AudioObjective::evaluate(const std::vector<std::vector<d
     return out;
 }
 
+std::vector<Evaluation> AudioObjective::embed(const std::vector<std::vector<double>>& coords) {
+    const std::size_t n = coords.size();
+    std::vector<Evaluation> out(n);
+    std::vector<std::shared_ptr<const host::Audio>> audio(n);
+    std::vector<host::Job> jobs;
+    std::vector<std::pair<std::size_t, std::string>> owners;  // candidate, cache key
+    for (std::size_t i = 0; i < n; ++i) {
+        host::Job j = job_;
+        j.coords = coords[i];
+        std::string key = RenderCache::key(j);
+        if (auto hit = cache_.find(key)) {
+            out[i].outcome = hit->outcome;
+            out[i].message = hit->message;
+            audio[i] = hit->audio;
+            continue;
+        }
+        jobs.push_back(std::move(j));
+        owners.emplace_back(i, std::move(key));
+    }
+    if (!jobs.empty()) {
+        auto results = render_(jobs);
+        results.resize(jobs.size(), unexpected(Outcome::HostError));
+        for (std::size_t k = 0; k < jobs.size(); ++k) {
+            const auto& [i, key] = owners[k];
+            CachedRender c;
+            if (results[k]) c.audio = std::make_shared<const host::Audio>(std::move(*results[k]));
+            else c.outcome = results[k].error();
+            out[i].outcome = c.outcome;
+            audio[i] = c.audio;
+            cache_.insert(key, std::move(c));
+        }
+    }
+    std::atomic<std::size_t> next{0};
+    auto work = [&](std::size_t t) {
+        for (std::size_t i = next++; i < n; i = next++) {
+            if (out[i].outcome == Outcome::Ok && !audio[i]) out[i].outcome = Outcome::HostError;
+            if (out[i].ok()) out[i].embedding = embedders_[t]->embed(mono_of(*audio[i]));
+        }
+    };
+    const std::size_t threads = std::min(embedders_.size(), n);
+    std::vector<std::thread> pool;
+    for (std::size_t t = 1; t < threads; ++t) pool.emplace_back(work, t);
+    work(0);
+    for (auto& t : pool) t.join();
+    return out;
+}
+
 }  // namespace mimicry::opt

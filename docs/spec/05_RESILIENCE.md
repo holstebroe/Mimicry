@@ -43,7 +43,8 @@ All rendering happens in `mimicry_worker` processes. The supervisor:
 - **Adapt.** If more than half of a generation is invalid, shrink sigma by 0.7 and recentre on the best
   valid point [D].
 - **Safe box.** The probe renders every parameter at its extremes and midpoint with the others at
-  default. A range that fails is shortened to the last good value; the search runs inside this box.
+  default. A range that fails is shortened to the last good value on that side of the default (to the default
+  itself when the probe value next to it fails [A]); the search runs inside this box.
 - **Never rely on in-plugin guards.** A plugin that clamps internally can still stay in a bad state;
   check outputs, not intentions.
 

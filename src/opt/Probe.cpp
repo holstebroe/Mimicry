@@ -9,6 +9,7 @@
 #include "features/Features.hpp"
 #include "features/Loss.hpp"
 #include "features/Pitch.hpp"
+#include "opt/Space.hpp"
 
 namespace mimicry::opt {
 
@@ -22,10 +23,6 @@ constexpr double kPitchCents = 20, kBrightOct = 0.15, kTimeLog2 = 0.25, kLevelDb
 bool probed(const host::ParamDesc& p) {
     return !p.flags.readonly && !p.flags.bypass && !p.flags.program_change && !p.flags.hidden && p.flags.automatable &&
            p.steps != 1;
-}
-
-double snap(const host::ParamDesc& p, double u) {
-    return p.steps >= 2 ? std::round(u * (p.steps - 1)) / double(p.steps - 1) : u;
 }
 
 struct Scores {
@@ -137,7 +134,7 @@ expected<Profile, std::string> probe(const RenderBatch& render, const host::Plug
         idx.push_back(i);
         for (double u : kProbeU) {
             auto c = defaults;
-            c[i] = snap(params[i], u);
+            c[i] = snap_to_grid(params[i].steps, u);
             jobs.push_back(job_at(c));
         }
     }
@@ -210,17 +207,19 @@ expected<Profile, std::string> probe(const RenderBatch& render, const host::Plug
                 }
             }
         }
-        // 4. Safe box: the run of good probe values around the default, cut at the last good value
-        // (spec 05 section 3).
-        std::size_t d = 0;
-        for (std::size_t k = 1; k < 5; ++k)
-            if (std::abs(kProbeU[k] - defaults[idx[n]]) < std::abs(kProbeU[d] - defaults[idx[n]])) d = k;
-        if (q.outcomes[d] == Outcome::Ok) {
-            std::size_t lo = d, hi = d;
-            while (lo > 0 && q.outcomes[lo - 1] == Outcome::Ok) --lo;
-            while (hi < 4 && q.outcomes[hi + 1] == Outcome::Ok) ++hi;
-            q.safe_lo = std::min(kProbeU[lo], defaults[idx[n]]);
-            q.safe_hi = std::max(kProbeU[hi], defaults[idx[n]]);
+        // 4. Safe box: the run of good probe values on each side of the default (which rendered), cut at the
+        // last good value (spec 05 section 3). A failure next to the default narrows that side to the default.
+        const double def_u = defaults[idx[n]];
+        q.safe_lo = q.safe_hi = def_u;
+        for (std::size_t k = 5; k-- > 0;) {
+            if (kProbeU[k] > def_u) continue;
+            if (q.outcomes[k] != Outcome::Ok) break;
+            q.safe_lo = kProbeU[k];
+        }
+        for (std::size_t k = 0; k < 5; ++k) {
+            if (kProbeU[k] < def_u) continue;
+            if (q.outcomes[k] != Outcome::Ok) break;
+            q.safe_hi = kProbeU[k];
         }
         prof.params.push_back(std::move(q));
     }
@@ -241,8 +240,8 @@ expected<Profile, std::string> probe(const RenderBatch& render, const host::Plug
                 pairs.emplace_back(a, b);
                 for (int corner = 0; corner < 4; ++corner) {
                     auto c = defaults;
-                    c[a] = snap(params[a], (corner & 1) ? options.pair_hi : options.pair_lo);
-                    c[b] = snap(params[b], (corner & 2) ? options.pair_hi : options.pair_lo);
+                    c[a] = snap_to_grid(params[a].steps, (corner & 1) ? options.pair_hi : options.pair_lo);
+                    c[b] = snap_to_grid(params[b].steps, (corner & 2) ? options.pair_hi : options.pair_lo);
                     pj.push_back(job_at(c));
                 }
             }

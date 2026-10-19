@@ -158,11 +158,11 @@ std::vector<double> Space::values(std::size_t index) const {
     return v;
 }
 
-double Space::snap(std::size_t index, double u) const {
-    const int steps = slots_[index].steps;
-    if (steps < 2) return u;
-    return std::round(u * (steps - 1)) / double(steps - 1);
+double snap_to_grid(int steps, double u) noexcept {
+    return steps >= 2 ? std::round(u * (steps - 1)) / double(steps - 1) : u;
 }
+
+double Space::snap(std::size_t index, double u) const { return snap_to_grid(slots_[index].steps, u); }
 
 double Space::to_u(std::size_t index, double x) const {
     if (!slots_[index].warp_log) return x;
@@ -182,21 +182,51 @@ double Space::decode(const std::vector<std::size_t>& free, const std::vector<dou
         const double xlo = to_x(i, s.lo), xhi = to_x(i, s.hi);
         const double xc = std::clamp(x[k], xlo, xhi);
         penalty += (x[k] - xc) * (x[k] - xc);
-        double u = snap(i, std::clamp(to_u(i, xc), s.lo, s.hi));
-        if (s.steps >= 2) {  // a grid point just outside an off-grid safe bound: one step inwards
-            const double step = 1.0 / double(s.steps - 1);
-            if (u > s.hi + 1e-12) u -= step;
-            if (u < s.lo - 1e-12) u += step;
-        }
-        coords[i] = std::clamp(u, 0.0, 1.0);
+        coords[i] = snap_inside(i, to_u(i, xc));
     }
     return penalty;
+}
+
+double Space::snap_inside(std::size_t index, double u) const {
+    const Slot& s = slots_[index];
+    u = snap(index, std::clamp(u, s.lo, s.hi));
+    if (s.steps >= 2) {
+        const double step = 1.0 / double(s.steps - 1);
+        if (u > s.hi + 1e-12) u -= step;
+        if (u < s.lo - 1e-12) u += step;
+    }
+    return std::clamp(u, 0.0, 1.0);
 }
 
 std::vector<double> Space::encode(const std::vector<std::size_t>& free, const std::vector<double>& coords) const {
     std::vector<double> x(free.size());
     for (std::size_t k = 0; k < free.size(); ++k) x[k] = to_x(free[k], coords[free[k]]);
     return x;
+}
+
+std::vector<double> Space::sample_box(const std::vector<double>& unit, Rng& rng) const {
+    auto c = defaults_;
+    std::vector<double> x(active_.size());
+    for (std::size_t k = 0; k < active_.size() && k < unit.size(); ++k) {
+        const Slot& s = slots_[active_[k]];
+        const double lo = to_x(active_[k], s.lo), hi = to_x(active_[k], s.hi);
+        x[k] = lo + unit[k] * (hi - lo);
+    }
+    decode(active_, x, c);
+    for (auto ci : categorical_) {
+        const auto vals = values(ci);
+        if (!vals.empty()) c[ci] = vals[rng.below(vals.size())];
+    }
+    return c;
+}
+
+std::vector<double> Space::conform(std::vector<double> coords) const {
+    coords.resize(slots_.size());
+    for (std::size_t i = 0; i < slots_.size(); ++i) {
+        if (slots_[i].role == Role::Fixed || !std::isfinite(coords[i])) coords[i] = defaults_[i];
+        else coords[i] = snap_inside(i, coords[i]);
+    }
+    return coords;
 }
 
 double Space::prior(const std::vector<double>& coords) const {

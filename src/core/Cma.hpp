@@ -82,6 +82,12 @@ struct CmaResult {
     int restarts = 0;
 };
 
+// The restart policy, shared by cma_minimize and callers that drive Cma themselves (the pipeline):
+// whether a run has converged and should restart, and the options of run `restart` (0 = the first) after
+// a run that ended with population `previous_lambda`.
+[[nodiscard]] bool cma_should_restart(const Cma& cma, const CmaRunOptions& options);
+[[nodiscard]] CmaOptions cma_restart_options(const CmaRunOptions& options, int restart, int previous_lambda);
+
 // Minimises f with restarts from the best point (population doubled, sigma halved).
 [[nodiscard]] CmaResult cma_minimize(const std::function<double(const std::vector<double>&)>& f,
                                      std::vector<double> x0, const CmaRunOptions& options);

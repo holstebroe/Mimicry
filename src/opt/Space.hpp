@@ -16,6 +16,7 @@
 #include <vector>
 
 #include "core/ParamSemantics.hpp"
+#include "core/Rng.hpp"
 #include "host/PluginHost.hpp"
 #include "opt/Profile.hpp"
 
@@ -30,6 +31,9 @@ enum class Mode { Hybrid, Guided, Unsupervised };
 // The stage that frees a group (spec 04 section 4): 2 osc + amp, 3 filter + env, 4 lfo + fx, 5 = only the
 // joint polish (global, unknown).
 [[nodiscard]] int stage_of(ParamGroup group) noexcept;
+
+// Rounds u to the grid of a parameter with `steps` values (steps < 2: continuous, unchanged).
+[[nodiscard]] double snap_to_grid(int steps, double u) noexcept;
 
 struct Slot {
     std::size_t index = 0;   // into Instance::parameters()
@@ -87,6 +91,14 @@ public:
     // The strategy vector for `free` read from a full vector.
     [[nodiscard]] std::vector<double> encode(const std::vector<std::size_t>& free, const std::vector<double>& coords) const;
 
+    // A full vector from one unit-cube point (one entry per active parameter, e.g. a Latin-hypercube row):
+    // the active parameters spread over the safe box in x, categoricals drawn uniformly from `rng`, the
+    // rest at default (S1 and the fingerprint presets).
+    [[nodiscard]] std::vector<double> sample_box(const std::vector<double>& unit, Rng& rng) const;
+    // A vector from outside the search (a fingerprint row, a warm start) made a point of this space: fixed
+    // parameters at their defaults, the others clipped to the safe box and snapped to their grid.
+    [[nodiscard]] std::vector<double> conform(std::vector<double> coords) const;
+
     // Mean squared distance from the defaults over the active parameters, in u (the prior, spec 04 section 6).
     [[nodiscard]] double prior(const std::vector<double>& coords) const;
     // RMS distance over the active and categorical parameters, in u (diversity, spec 04 section 5).
@@ -96,6 +108,9 @@ public:
     [[nodiscard]] long level_index() const noexcept { return level_; }
 
 private:
+    // snap() inside the safe box: a grid point just outside an off-grid bound moves one step inwards.
+    [[nodiscard]] double snap_inside(std::size_t index, double u) const;
+
     std::vector<host::ParamDesc> params_;
     std::vector<Slot> slots_;
     std::vector<double> defaults_;

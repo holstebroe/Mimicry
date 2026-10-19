@@ -124,9 +124,11 @@ and `src/opt` use these [D] unless noted:
 - **Invalid candidates** rank after all valid ones as `10^6 + 10^4 · severity + 100 · distance` to the run's
   best valid point (05 §3); more than half invalid shrinks sigma by 0.7 and recentres on the best valid point.
 - **Budget.** S1 renders `min(N, budget / 4)` LHS points in the safe box (categoricals uniform), after the
-  defaults and any given seeds; S2-S4 get 12 % each of what is left (time and evaluations), S5 75 % of what
+  defaults and any given seeds (each conformed to the space first: fixed parameters at their defaults,
+  the others clipped to the safe box and snapped to their grid [A]); S2-S4 get 12 % each of what is left (time and evaluations), S5 75 % of what
   is left, S6 inner runs 35 % each, S7 the rest. S5 run 1 polishes the best point with half of S5; runs
-  2..R start from the next distinct S1 seeds (sigma 0.3) and split the other half. Patience applies per
+  2..R start from the next S1 seeds not yet used as a start or near a run's best (sigma 0.3) and split the
+  other half. Patience applies per
   CMA-ES run, the time cap and evaluation budget globally.
 - **Categorical sweep.** S1 and each group stage end with a one-at-a-time sweep of every categorical
   parameter on the best point (two passes at most), so S5 does not polish the wrong waveform. S6 then ranks
@@ -136,8 +138,8 @@ and `src/opt` use these [D] unless noted:
   keeps the combination of the improving moves if it beats the best single move. The holdout check is WP6.2.
 - **Interaction.** A pair the probe finds non-separable (interaction RMS above `2 · floor + 0.5`) with its
   parameters in different stages moves the later one into the earlier one's group.
-- **Top-K.** The best of each CMA-ES run, S6 and S7 (up to 24) are re-scored with embeddings (cached
-  renders); a candidate joins the top K unless it is within 0.1 RMS in `u` of one already chosen or within
+- **Top-K.** The best of each CMA-ES run, S6 and S7 (up to 24) are re-scored with embeddings (one render
+  each, cached; never the repeats of a noisy plugin; a failure is counted in the outcomes [A]); a candidate joins the top K unless it is within 0.1 RMS in `u` of one already chosen or within
   0.5 embedding units of it (it sounds the same).
 - **Embedding** (77 floats, dB-like): 32 log-mel band means relative to their mean and their standard
   deviations over frames within 60 dB of the loudest, centroid (6 · log2 Hz) and flatness mean and standard
@@ -148,10 +150,12 @@ and `src/opt` use these [D] unless noted:
   f0 changes by a small-integer ratio are estimator jumps, not pitch. Dead: embedding change at most
   `max(3 · floor, 0.15)`, level within 0.5 dB, pitch within 5 cents, and nothing failed. Otherwise the
   largest score >= 1 wins (`fx` when the tail grows twice as much as the decay and flatness moves 1.5 dB),
-  else `spectrum`. The safe box is the run of good probe values around the default. Pairs: the 10
+  else `spectrum`. The safe box is the run of good probe values on each side of the default; a
+  failure next to the default narrows that side to the default itself [A]. Pairs: the 10
   strongest parameters, corners at 0.25 / 0.75.
 - **Surrogate.** On when a candidate costs more than 1 s (or forced): a GP (RBF, length scale = median
-  pairwise distance, standardised targets) on the last 150 valid points of the free subset ranks 3λ
+  pairwise distance, standardised targets) on the last 150 valid points of the free subset that agree with
+  the run on every searched parameter it holds [A] ranks 3λ
   samples by `mean − sd`, and the best λ are rendered.
 - **Fingerprint file:** `profiles/<format>-<uid>-<version hash>.fingerprint`, magic `MIMFPDB1`, a JSON header
   line (ids, names, counts), then float32 rows of coordinates and embedding. A database is used only for

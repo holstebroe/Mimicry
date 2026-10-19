@@ -421,7 +421,7 @@ int cmd_fit(const Args& a) {
     fs::create_directories(dir / "top-k", ec);
     if (ec) return fail("fit", "cannot create " + dir.string());
     auto text = [&](std::uint32_t id, double u) {
-        if (p.pool) return p.pool->client(0).value_text(id, u);
+        if (p.pool) return p.pool->value_text(id, u);
         std::lock_guard lock(p.local_mutex);
         return p.local->value_text(id, u);
     };

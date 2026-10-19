@@ -196,18 +196,29 @@ void Cma::update_eigen() {
     for (std::size_t i = 0; i < values.size(); ++i) d_[i] = std::sqrt(std::max(values[i], 1e-300));
 }
 
+bool cma_should_restart(const Cma& cma, const CmaRunOptions& options) {
+    return cma.sigma() < options.sigma_min || cma.condition() > options.max_condition;
+}
+
+CmaOptions cma_restart_options(const CmaRunOptions& options, int restart, int previous_lambda) {
+    CmaOptions co = options.cma;
+    co.seed = options.cma.seed + static_cast<std::uint64_t>(restart) * 7919u;
+    if (restart > 0) {
+        co.sigma0 = options.cma.sigma0 * options.restart_sigma;
+        co.lambda = std::min(options.max_lambda, previous_lambda * 2);
+    }
+    return co;
+}
+
 CmaResult cma_minimize(const std::function<double(const std::vector<double>&)>& f, std::vector<double> x0,
                        const CmaRunOptions& options) {
     CmaResult best;
     best.x = x0;
     best.f = f(x0);
     best.evals = 1;
-    CmaOptions co = options.cma;
-    double sigma = co.sigma0;
+    int lambda = 0;
     for (int restart = 0; restart <= options.max_restarts && best.evals < options.max_evals; ++restart) {
-        co.sigma0 = sigma;
-        co.seed = options.cma.seed + static_cast<std::uint64_t>(restart) * 7919u;
-        Cma cma(best.x, co);
+        Cma cma(best.x, cma_restart_options(options, restart, lambda));
         while (best.evals < options.max_evals && best.f > options.target) {
             auto xs = cma.ask();
             std::vector<double> fs(xs.size());
@@ -220,12 +231,11 @@ CmaResult cma_minimize(const std::function<double(const std::vector<double>&)>& 
             }
             best.evals += static_cast<long>(xs.size());
             cma.tell(xs, fs);
-            if (cma.sigma() < options.sigma_min || cma.condition() > options.max_condition) break;
+            if (cma_should_restart(cma, options)) break;
         }
         if (best.f <= options.target) break;
         best.restarts = restart + 1;
-        sigma = options.cma.sigma0 * options.restart_sigma;
-        co.lambda = std::min(options.max_lambda, cma.lambda() * 2);
+        lambda = cma.lambda();
     }
     return best;
 }

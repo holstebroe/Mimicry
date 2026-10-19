@@ -7,6 +7,7 @@
 #include <filesystem>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include "core/Expected.hpp"
@@ -66,8 +67,13 @@ struct Profile {
     [[nodiscard]] expected<void, std::string> save(const std::filesystem::path& path) const;
     [[nodiscard]] static expected<Profile, std::string> load(const std::filesystem::path& path);
 
-    // profiles/<format>-<uid>-<version hash>.json under `dir`; unsafe file name characters become '_'.
+    // profiles/<format>-<uid>-<version hash>.json under `dir` (plugin_file_path).
     [[nodiscard]] static std::filesystem::path default_path(const std::filesystem::path& dir, const host::PluginInfo& info);
 };
+
+// <dir>/<format>-<uid>-<version hash><extension>, unsafe file name characters as '_': the one naming rule
+// of every per-plugin file (profile, fingerprint database).
+[[nodiscard]] std::filesystem::path plugin_file_path(const std::filesystem::path& dir, const host::PluginInfo& info,
+                                                     std::string_view extension);
 
 }  // namespace mimicry::opt

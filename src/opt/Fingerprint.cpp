@@ -2,7 +2,6 @@
 
 #include <algorithm>
 #include <atomic>
-#include <cctype>
 #include <cstring>
 #include <fstream>
 #include <numeric>
@@ -95,12 +94,7 @@ expected<FingerprintDb, std::string> FingerprintDb::load(const std::filesystem::
 }
 
 std::filesystem::path FingerprintDb::default_path(const std::filesystem::path& dir, const host::PluginInfo& info) {
-    std::string name = std::string(host::to_string(info.format)) + "-" + info.uid + "-" + info.version_hash;
-    for (auto& c : name) {
-        const unsigned char u = static_cast<unsigned char>(c);
-        if (!(std::isalnum(u) || c == '-' || c == '.' || c == '_')) c = '_';
-    }
-    return dir / (name + ".fingerprint");
+    return plugin_file_path(dir, info, ".fingerprint");
 }
 
 FingerprintDb build_fingerprints(const RenderBatch& render, const host::PluginInfo& info, const Space& space,
@@ -114,8 +108,7 @@ FingerprintDb build_fingerprints(const RenderBatch& render, const host::PluginIn
         db.names.push_back(p.name);
     }
     Rng rng(options.seed);
-    const auto& active = space.active();
-    const auto lhs = latin_hypercube(std::size_t(std::max(0L, options.count)), active.size(), rng);
+    const auto lhs = latin_hypercube(std::size_t(std::max(0L, options.count)), space.active().size(), rng);
     const std::size_t threads = std::size_t(std::max(1, options.threads));
     std::vector<std::unique_ptr<Embedder>> embedders;
     for (std::size_t t = 0; t < threads; ++t) embedders.push_back(std::make_unique<Embedder>(options.job.sample_rate));
@@ -125,17 +118,7 @@ FingerprintDb build_fingerprints(const RenderBatch& render, const host::PluginIn
         std::vector<host::Job> jobs;
         for (std::size_t i = start; i < end; ++i) {
             host::Job j = options.job;
-            j.coords = space.defaults();
-            std::vector<double> x(active.size());
-            for (std::size_t k = 0; k < active.size(); ++k) {
-                const auto& s = space.slot(active[k]);
-                x[k] = space.to_x(active[k], s.lo) + lhs[i][k] * (space.to_x(active[k], s.hi) - space.to_x(active[k], s.lo));
-            }
-            space.decode(active, x, j.coords);
-            for (auto c : space.categorical()) {
-                const auto vals = space.values(c);
-                if (!vals.empty()) j.coords[c] = vals[rng.below(vals.size())];
-            }
+            j.coords = space.sample_box(lhs[i], rng);
             jobs.push_back(std::move(j));
         }
         auto results = render(jobs);
