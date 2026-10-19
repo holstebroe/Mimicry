@@ -305,6 +305,9 @@ void test_cache() {
     b.block_size = 256;
     check(opt::RenderCache::key(a) != opt::RenderCache::key(b), "block size is part of the key");
     b = a;
+    b.bend_range = 2;
+    check(opt::RenderCache::key(a) != opt::RenderCache::key(b), "the pitch-bend range is part of the key");
+    b = a;
     b.notes[0].cents = 3;
     check(opt::RenderCache::key(a) != opt::RenderCache::key(b), "note plan is part of the key");
     b = a;

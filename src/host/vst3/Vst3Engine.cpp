@@ -152,10 +152,7 @@ public:
                 if (mapping->getMidiControllerAssignment(0, 0, ControllerNumbers::kPitchBend, id) == kResultTrue) bend_param_ = id;
                 for (int16 ch = 0; ch < 16; ++ch)
                     for (int32 cc = 0; cc < kCountCtrlNumber; ++cc)
-                        if (mapping->getMidiControllerAssignment(0, ch, CtrlNumber(cc), id) == kResultTrue) {
-                            midi_params_.insert(id);
-                            if (cc == kCtrlProgramChange && ch == 0) program_change_param_ = id;
-                        }
+                        if (mapping->getMidiControllerAssignment(0, ch, CtrlNumber(cc), id) == kResultTrue) midi_params_.insert(id);
             }
         }
 
@@ -412,10 +409,9 @@ private:
         for (int32 i = 0; i < n; ++i) {
             ParameterInfo pi{};
             if (controller_->getParameterInfo(i, pi) != kResultOk) continue;
-            // MIDI input proxy (see open). A program change is a MIDI event whatever its flags; preset harvest
-            // (plan WP1.11) reaches it through program_change_param_.
-            if (midi_params_.count(pi.id) && (!(pi.flags & ParameterInfo::kCanAutomate) || program_change_param_ == pi.id))
-                continue;
+            // MIDI input proxy (see open). IMidiMapping cannot be asked for program change (kCtrlProgramChange is
+            // outside kCountCtrlNumber): a wrapper's program-change parameter stays, pinned and never sent.
+            if (midi_params_.count(pi.id) && !(pi.flags & ParameterInfo::kCanAutomate)) continue;
             ParamDesc d;
             d.id = pi.id;
             d.name = utf8(pi.title);
@@ -451,7 +447,6 @@ private:
     FUnknownPtr<IUnitInfo> unit_info_;
     std::optional<ParamID> bend_param_;  // IMidiMapping of kPitchBend, if the controller offers one
     std::unordered_set<ParamID> midi_params_;  // every IMidiMapping target
-    std::optional<ParamID> program_change_param_;  // IMidiMapping of MIDI program change, channel 1 (for WP1.11)
 
     PluginInfo info_;
     std::vector<ParamDesc> params_list_;
