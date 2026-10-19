@@ -321,7 +321,7 @@ void test_cache() {
     int fails = 0;
     auto crash = [&](const host::Job&) -> expected<host::Audio, Outcome> {
         ++fails;
-        return unexpected(Outcome::Crash);
+        return mimicry::unexpected(Outcome::Crash);
     };
     host::Job c = a;
     c.coords[0] = 0.9;
@@ -330,7 +330,7 @@ void test_cache() {
     check(fails == 1 && f1.outcome == Outcome::Crash && f2.message == "segfault", "a crash is remembered, not re-rendered");
     auto timeout = [&](const host::Job&) -> expected<host::Audio, Outcome> {
         ++fails;
-        return unexpected(Outcome::Timeout);
+        return mimicry::unexpected(Outcome::Timeout);
     };
     host::Job d = a;
     d.coords[0] = 0.5;

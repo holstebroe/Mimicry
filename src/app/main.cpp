@@ -171,11 +171,11 @@ struct Plugin {
 };
 
 expected<std::unique_ptr<Plugin>, std::string> open_plugin(const std::string& path, const Args& args) {
-    if (auto f = host::format_from_path(path); !f) return unexpected(f.error());
+    if (auto f = host::format_from_path(path); !f) return mimicry::unexpected(f.error());
     auto p = std::make_unique<Plugin>();
     if (args.has("--no-isolation")) {
         auto inst = host::open(path);
-        if (!inst) return unexpected(inst.error().message);
+        if (!inst) return mimicry::unexpected(inst.error().message);
         p->local = std::move(*inst);
         p->info = p->local->info();
         p->params = p->local->parameters();
@@ -184,7 +184,7 @@ expected<std::unique_ptr<Plugin>, std::string> open_plugin(const std::string& pa
     const int cores = int(std::max(1u, std::thread::hardware_concurrency()));
     const int workers = int(args.num("--workers", std::max(1, cores - 1)));
     auto pool = supervisor::WorkerPool::open(path, {}, workers);
-    if (!pool) return unexpected(pool.error().message);
+    if (!pool) return mimicry::unexpected(pool.error().message);
     p->pool = std::move(*pool);
     p->info = p->pool->client(0).info();
     p->params = p->pool->client(0).parameters();

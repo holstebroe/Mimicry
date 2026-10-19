@@ -174,7 +174,7 @@ int serve(std::size_t shm_bytes) {
     ::dup2(2, 1);
 
     auto shm = ipc::SharedMemory::from_fd(kShmFd, shm_bytes);
-    if (shm && shm->size() <= ipc::kShmProgressBytes) shm = unexpected(std::string("shared memory too small"));
+    if (shm && shm->size() <= ipc::kShmProgressBytes) shm = mimicry::unexpected(std::string("shared memory too small"));
     if (!shm) {
         std::fputs(std::format("mimicry_worker: {}\n", shm.error()).c_str(), stderr);
         return 2;

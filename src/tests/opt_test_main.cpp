@@ -393,7 +393,7 @@ void test_probe_safe_box() {
         std::vector<expected<host::Audio, Outcome>> out;
         for (const auto& j : jobs) {
             if (j.coords[0] == 0.5 || j.coords[1] == 0.0) {
-                out.push_back(unexpected(Outcome::Crash));
+                out.push_back(mimicry::unexpected(Outcome::Crash));
                 continue;
             }
             host::Audio a{rate, 1, std::vector<float>(std::size_t(rate / 2))};

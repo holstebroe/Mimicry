@@ -105,6 +105,16 @@ SharedMemory& SharedMemory::operator=(SharedMemory&& o) noexcept {
     return *this;
 }
 
+#if !defined(__linux__)
+namespace {
+// Serialises pipe creation and spawning where pipes cannot be made close-on-exec atomically.
+std::mutex& spawn_mutex() {
+    static std::mutex m;
+    return m;
+}
+}  // namespace
+#endif
+
 expected<SharedMemory, std::string> SharedMemory::from_fd(int fd, std::size_t bytes) {
     void* p = ::mmap(nullptr, bytes, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
     if (p == MAP_FAILED) return unexpected(std::format("mmap failed: {}", std::strerror(errno)));
@@ -118,7 +128,17 @@ expected<SharedMemory, std::string> SharedMemory::from_fd(int fd, std::size_t by
 expected<SharedMemory, std::string> SharedMemory::create(std::size_t bytes) {
     static std::atomic<unsigned> counter{0};
     const std::string name = std::format("/mimicry-{}-{}", ::getpid(), counter++);
+#if defined(__linux__)
     const int fd = ::shm_open(name.c_str(), O_CREAT | O_EXCL | O_RDWR | O_CLOEXEC, 0600);
+#else
+    // macOS shm_open rejects O_CLOEXEC (EINVAL): set it right after, under the lock spawning also takes.
+    int fd = -1;
+    {
+        std::lock_guard lock(spawn_mutex());
+        fd = ::shm_open(name.c_str(), O_CREAT | O_EXCL | O_RDWR, 0600);
+        if (fd >= 0) ::fcntl(fd, F_SETFD, FD_CLOEXEC);
+    }
+#endif
     if (fd < 0) return unexpected(std::format("shm_open failed: {}", std::strerror(errno)));
     ::shm_unlink(name.c_str());  // nothing can leak from here on: the memory lives while a descriptor is open
     if (::ftruncate(fd, static_cast<off_t>(bytes)) != 0) {
@@ -154,15 +174,6 @@ Process& Process::operator=(Process&& o) noexcept {
     return *this;
 }
 
-#if !defined(__linux__)
-namespace {
-// Serialises pipe creation and spawning where pipes cannot be made close-on-exec atomically.
-std::mutex& spawn_mutex() {
-    static std::mutex m;
-    return m;
-}
-}  // namespace
-#endif
 
 bool make_cloexec_pipe(int fds[2]) {
 #if defined(__linux__)
