@@ -56,10 +56,6 @@ int main(int argc, char** argv) {
         std::fputs("usage: mimicry_fit_test <plugin> <mimicry_worker>\n", stderr);
         return 2;
     }
-#if defined(_WIN32)
-    std::puts("mimicry_fit_test: skipped (process isolation not implemented on Windows yet)");
-    return 0;
-#else
     supervisor::WorkerOptions wo;
     wo.worker_exe = argv[2];
     wo.min_timeout_s = 1.0;
@@ -187,9 +183,15 @@ int main(int argc, char** argv) {
                   "failure report values follow ids and names");
             if (argc > 3) {
                 auto run = [&](const std::string& extra, const std::filesystem::path& file) {
+#if defined(_WIN32)
+                    // cmd.exe strips the outer quotes of a line that starts with one.
+                    const std::string cmd = std::format("\"\"{}\" replay \"{}\" {} > NUL 2>&1\"", argv[3], file.string(), extra);
+                    return std::system(cmd.c_str());
+#else
                     const std::string cmd = std::format("\"{}\" replay \"{}\" {} > /dev/null 2>&1", argv[3], file.string(), extra);
                     const int st = std::system(cmd.c_str());
                     return WIFEXITED(st) ? WEXITSTATUS(st) : -1;
+#endif
                 };
                 check(run("--isolated", *crash_path) == 0, "replay --isolated reproduces the crash");
                 check(run("", *nan_path) == 0, "replay in-process reproduces the NaN");
@@ -312,5 +314,4 @@ int main(int argc, char** argv) {
     }
     std::puts("mimicry_fit_test: all passed");
     return 0;
-#endif
 }

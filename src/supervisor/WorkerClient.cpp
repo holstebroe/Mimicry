@@ -8,9 +8,6 @@
 #include "host/Codec.hpp"
 
 #if !defined(_WIN32)
-#include <fcntl.h>
-#include <unistd.h>
-
 #include <csignal>
 #endif
 
@@ -85,34 +82,34 @@ void WorkerClient::stop_worker() {
 }
 
 expected<void, HostError> WorkerClient::start_worker() {
-#if defined(_WIN32)
-    return unexpected(HostError{"process isolation is not implemented on Windows yet (plan WP1.5)"});
-#else
     stop_worker();
+#if !defined(_WIN32)
     // Writing to a worker that just died must be an error return, not a fatal signal.
     static const bool sigpipe_ignored = (std::signal(SIGPIPE, SIG_IGN), true);
     (void)sigpipe_ignored;
+#endif
     auto shm = ipc::SharedMemory::create(options_.shm_bytes);
     if (!shm) return unexpected(HostError{shm.error()});
-    int to_worker[2], from_worker[2];
-    if (!ipc::make_cloexec_pipe(to_worker)) return unexpected(HostError{"pipe failed"});
-    if (!ipc::make_cloexec_pipe(from_worker)) {
-        ::close(to_worker[0]);
-        ::close(to_worker[1]);
+    ipc::Handle to_read, to_write, from_read, from_write;
+    if (!ipc::make_pipe(to_read, to_write)) return unexpected(HostError{"pipe failed"});
+    if (!ipc::make_pipe(from_read, from_write)) {
+        ipc::close_handle(to_read);
+        ipc::close_handle(to_write);
         return unexpected(HostError{"pipe failed"});
     }
 
     auto proc = ipc::Process::spawn(options_.worker_exe, {"--serve", "--shm-bytes", std::to_string(options_.shm_bytes)},
-                                    {{to_worker[0], 3}, {from_worker[1], 4}, {shm->fd(), 5}});
-    ::close(to_worker[0]);
-    ::close(from_worker[1]);
+                                    {{to_read, 3}, {from_write, 4}, {shm->handle(), 5}});
+    // The child holds its own copies now; ours must go, or the worker's death would not close the pipe.
+    ipc::close_handle(to_read);
+    ipc::close_handle(from_write);
     if (!proc) {
-        ::close(to_worker[1]);
-        ::close(from_worker[0]);
+        ipc::close_handle(to_write);
+        ipc::close_handle(from_read);
         return unexpected(HostError{proc.error()});
     }
     process_ = std::move(*proc);
-    channel_ = ipc::LineChannel(from_worker[0], to_worker[1]);
+    channel_ = ipc::LineChannel(from_read, to_write);
     shm_ = std::move(*shm);
     ++stats_.spawned;
 
@@ -133,7 +130,6 @@ expected<void, HostError> WorkerClient::start_worker() {
     adopt(reply);
     open_ = true;
     return {};
-#endif
 }
 
 void WorkerClient::adopt(const json::Value& d) {

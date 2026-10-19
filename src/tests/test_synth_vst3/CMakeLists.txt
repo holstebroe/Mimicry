@@ -43,3 +43,15 @@ make_clapfirst_plugins(
     BUNDLE_VERSION 0.1.0
     PLUGIN_FORMATS CLAP VST3
     ASSET_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/assets)
+
+# Windows single-file VST3: clap-wrapper sets its output directory on a misspelt target name
+# (wrap_vst3.cmake: VST3_TARGET for V3_TARGET), so a multi-config generator would put the file in
+# <build>/<config>/. Pin it, for every configuration, where the host build expects it (assets/VST3).
+if(WIN32 AND TARGET mimicry_test_synth_vst3)
+    set(_tsv_out ${CMAKE_BINARY_DIR}/assets/VST3)
+    set_target_properties(mimicry_test_synth_vst3 PROPERTIES LIBRARY_OUTPUT_DIRECTORY ${_tsv_out})
+    foreach(_cfg Debug Release RelWithDebInfo MinSizeRel)
+        string(TOUPPER ${_cfg} _CFG)
+        set_target_properties(mimicry_test_synth_vst3 PROPERTIES LIBRARY_OUTPUT_DIRECTORY_${_CFG} ${_tsv_out})
+    endforeach()
+endif()

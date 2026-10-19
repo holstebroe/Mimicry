@@ -14,6 +14,7 @@
 #include <cstring>
 #include <exception>
 #include <format>
+#include <map>
 #include <memory>
 #include <string>
 #include <string_view>
@@ -27,7 +28,17 @@
 #if defined(__linux__)
 #include <sys/prctl.h>
 #endif
-#if !defined(_WIN32)
+#if defined(_WIN32)
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
+
+#include <cstdlib>
+#else
 #include <csignal>
 #include <unistd.h>
 #endif
@@ -36,7 +47,7 @@ namespace {
 
 using namespace mimicry;
 
-constexpr int kInFd = 3, kOutFd = 4, kShmFd = 5;
+constexpr int kInFd = 3, kOutFd = 4, kShmFd = 5;  // HandleMapping::to of the three inherited handles
 
 json::Value error_reply(std::string_view message) {
     json::Value v;
@@ -160,26 +171,31 @@ private:
     std::unique_ptr<host::Instance> instance_;
 };
 
-int serve(std::size_t shm_bytes) {
+int serve(std::size_t shm_bytes, const std::map<int, ipc::Handle>& handles) {
 #if defined(_WIN32)
-    (void)shm_bytes;
-    std::fputs("mimicry_worker: process isolation is not implemented on Windows yet\n", stderr);
-    return 2;
+    // A crashing plugin must end the process at once: no error dialog, no Windows Error Reporting UI waiting for
+    // a click (the supervisor would see a hang instead of a crash).
+    ::SetErrorMode(SEM_FAILCRITICALERRORS | SEM_NOGPFAULTERRORBOX | SEM_NOOPENFILEERRORBOX);
+    _set_abort_behavior(0, _WRITE_ABORT_MSG | _CALL_REPORTFAULT);
 #else
     std::signal(SIGPIPE, SIG_IGN);
 #if defined(__linux__)
-    ::prctl(PR_SET_PDEATHSIG, SIGKILL);  // never outlive the supervisor
+    ::prctl(PR_SET_PDEATHSIG, SIGKILL);  // never outlive the supervisor (Windows: the supervisor's job object)
 #endif
     // Plugins print to stdout; the protocol does not use it.
     ::dup2(2, 1);
-
-    auto shm = ipc::SharedMemory::from_fd(kShmFd, shm_bytes);
+#endif
+    auto handle = [&](int to) {
+        const auto it = handles.find(to);
+        return it == handles.end() ? ipc::kNoHandle : it->second;
+    };
+    auto shm = ipc::SharedMemory::from_handle(handle(kShmFd), shm_bytes);
     if (shm && shm->size() <= ipc::kShmProgressBytes) shm = mimicry::unexpected(std::string("shared memory too small"));
     if (!shm) {
         std::fputs(std::format("mimicry_worker: {}\n", shm.error()).c_str(), stderr);
         return 2;
     }
-    ipc::LineChannel channel(kInFd, kOutFd);
+    ipc::LineChannel channel(handle(kInFd), handle(kOutFd));
     Server server(channel, *shm);
 
     std::string line;
@@ -197,7 +213,6 @@ int serve(std::size_t shm_bytes) {
         }
         if (!server.handle(*msg)) return 0;
     }
-#endif
 }
 
 }  // namespace
@@ -218,5 +233,5 @@ int main(int argc, char** argv) {
         std::fputs("usage: mimicry_worker --serve --shm-bytes N   (started by mimicry; see docs/spec/05_RESILIENCE.md)\n", stderr);
         return 2;
     }
-    return serve(shm_bytes);
+    return serve(shm_bytes, ipc::inherited_handles(argc, argv));
 }

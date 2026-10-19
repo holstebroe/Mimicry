@@ -14,7 +14,15 @@
 #include "supervisor/WorkerPool.hpp"
 #include "tests/test_synth/TestSynthCore.hpp"
 
-#if !defined(_WIN32)
+#if defined(_WIN32)
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
+#else
 #include <sys/wait.h>
 #include <cerrno>
 #endif
@@ -48,11 +56,18 @@ void make_crash(host::Job& job) {
     job.coords[ts::kHazB] = 0.95;
 }
 
+// Open descriptors (POSIX) or handles (Windows) of this process.
 int open_fds() {
+#if defined(_WIN32)
+    DWORD n = 0;
+    ::GetProcessHandleCount(::GetCurrentProcess(), &n);
+    return int(n);
+#else
     int n = 0;
     std::error_code ec;
     for (const auto& e : std::filesystem::directory_iterator("/proc/self/fd", ec)) { (void)e; ++n; }
     return n;
+#endif
 }
 
 }  // namespace
@@ -69,10 +84,6 @@ int main(int argc, char** argv) {
     opt.timeout_factor = 0;  // the tests use the floor; the production factor is 20x audio duration
     opt.shm_bytes = 16u << 20;
 
-#if defined(_WIN32)
-    std::puts("mimicry_worker_test: skipped (process isolation not implemented on Windows yet)");
-    return 0;
-#else
     // The same job in-process and through a worker gives identical audio.
     auto direct = host::open(plugin);
     auto client = WorkerClient::open(plugin, {}, opt);
@@ -260,11 +271,12 @@ int main(int argc, char** argv) {
     }
 
     client->reset();
-    // No zombies: every child has been reaped.
+#if !defined(_WIN32)
+    // No zombies: every child has been reaped (Windows: every process handle is closed, counted above).
     int status = 0;
     check(::waitpid(-1, &status, WNOHANG) == -1 && errno == ECHILD, "no zombie or unreaped children");
+#endif
 
     if (failures == 0) std::puts("mimicry_worker_test: all checks passed");
     return failures == 0 ? 0 : 1;
-#endif
 }
