@@ -110,7 +110,7 @@ files, user presets, or the plugin's saved state on disk.
   because a program change would silently overwrite every other parameter mid-job. Preset harvest
   (06 §6) is the one place a program is changed, in its own jobs, and its result is a state blob that
   later jobs load whole.
-- **Plugin editors** are opened only by `capture`, in the worker. A crash or hang in the editor is a
+- **Plugin editors** are opened only by `capture` (Windows), in the worker. A crash or hang in the editor is a
   worker failure like any other: captures already saved are kept, and the session restarts the worker.
 - **Offline mode**: VST3 is set up in offline processing mode (02 §5); a plugin that behaves differently
   there is flagged by the repeatability probe, which renders in the same mode the fit will use.

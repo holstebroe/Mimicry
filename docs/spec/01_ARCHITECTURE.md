@@ -103,7 +103,7 @@ builds use IPO and size-optimise glue as in Acidus [S].
 | `mimicry probe <plugin>` | Sensitivity + safe-range + hazard probe; writes the plugin profile |
 | `mimicry fit --plugin P --wav T.wav` | Match a WAV |
 | `mimicry harvest <plugin>` | Collect the plugin's presets as verified states into a library (06 §6) |
-| `mimicry capture <plugin>` | Open the plugin's editor; the user picks presets and Mimicry saves them (06 §6) |
+| `mimicry capture <plugin>` | Windows only: open the plugin's editor; the user picks presets (or teaches the "next" click) and Mimicry saves them (06 §6) |
 | `mimicry transfer --source A --target B` | Match source presets (one, several, or all) in B; A and B may be different formats, instruments or effects |
 | `mimicry map --source A --target B` | Parameter map between two plugins, and to roles, without fitting (04 §8) |
 | `mimicry doctor <plugin> [<plugin>]` | Diagnosis report of the plugin and every parameter; with two plugins, a comparison (08) |

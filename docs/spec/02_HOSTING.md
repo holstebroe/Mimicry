@@ -14,7 +14,7 @@ Instance::parameters()                    -> vector<ParamDesc>
 Instance::value_text(id, coord)           -> string                            // for units and semantics
 Instance::presets()                       -> vector<PresetRef>                 // factory programs / files (§7)
 Instance::apply_preset(ref)               -> expected<Captured, HostError>     // state blob + parameter snapshot (§7)
-Instance::open_editor() / close_editor()  -> expected<void>                    // capture only (§3, 06 §6)
+Instance::open_editor() / close_editor()  -> expected<void>                    // capture only, Windows (§3, 06 §6)
 Instance::render(Job)                     -> expected<Audio, Outcome>          // 05 §2 outcome codes
 Instance::save_state() / load_state(blob) -> expected<Blob / void>
 Instance::tail_samples() / latency()      -> int
@@ -58,7 +58,8 @@ string or the VST3 class id (TUID) plus name.
 | Reset | `deactivate` + `activate` (or `reset`) | `setProcessing(false)`, `setActive(false)`, `setActive(true)`, `setProcessing(true)` |
 | Factory presets | preset-discovery factory + `preset-load` extension (`from_location`, async `loaded` / `on_error`) | `IUnitInfo` program lists, `IProgramListData::getProgramData`, program-change parameter, `IMidiMapping` program change; `.vstpreset` files |
 | Audio input (effects) | `audio-ports` input port, `clap_audio_buffer` inputs | input bus arrangement, `ProcessData::inputs` |
-| Editor (capture only) | `gui` extension: `create(api, floating)`, `set_parent`, `show`; host `gui` callbacks | `IEditController::createView("editor")`, `IPlugView::attached` with `IPlugFrame`; Linux host `IRunLoop` |
+| Editor (capture only, Windows) | `gui` extension: `create("win32", false)`, `set_parent(HWND)`, `show`; host `gui` callbacks | `IEditController::createView("editor")`, `IPlugView::attached(HWND, kPlatformTypeHWND)` with `IPlugFrame` |
+| Preset name | discovery metadata (`begin_preset(name, load_key)`); host `preset-load.loaded` says which preset the plugin loaded | `IUnitInfo::getProgramName`; value text of the program-change parameter |
 | Kind | note input + audio output = instrument; audio in+out = effect | event input bus + audio output = instrument; audio in+out = effect; class subcategories as a hint |
 
 Rules for the VST3 backend:
@@ -83,8 +84,9 @@ start/stop-processing calls on the render thread.
 Many plugins (JUCE-based ones in particular, in either format) expect a **running message loop on the
 main thread** for timers and async updates. The worker's main thread therefore pumps a minimal loop
 between jobs (Win32 message pump, macOS run loop, a poll loop on Linux). No window is created, except
-by `capture` (06 §6), which opens the plugin's editor in a native top-level window of the worker
-(X11, Win32, Cocoa; plan OQ12): the supervisor never loads the plugin or its editor. A plugin that blocks
+by `capture` (06 §6), which opens the plugin's editor in a Win32 top-level window of the worker. Editor
+hosting is **Windows only** [D: owner, plan OQ12]; elsewhere `open_editor` returns an error. The
+supervisor never loads the plugin or its editor. A plugin that blocks
 waiting for a dialog or window is caught by the watchdog (05 §1).
 
 ## 4. Parameters
@@ -155,6 +157,8 @@ and a name when the plugin has one. Methods per format, in the order the harvest
 | Method | CLAP | VST3 |
 | --- | --- | --- |
 | State file | `state.load` of a file blob | `.vstpreset` chunks into `IComponent::setState` + controller |
+| Preset folder | discovery `declare_location` (file locations) and `declare_filetype` (extensions) → `preset-load.from_location(FILE, path, null)` [S: CLAP] | standard `VST3 Presets/<vendor>/<plugin>` folders (user and system) → `.vstpreset` [S: VST3 SDK] |
+| Raw file as state (opt-in) [I] | `state.load` of a plugin-specific preset file | `IComponent::setState` of it; works only where the plugin's file is its state, so it is verified like every load |
 | Plugin presets | preset-discovery providers → locations (file / plugin) + load keys → `preset-load.from_location` [S: CLAP] | `IProgramListData::getProgramData` per program when `programDataSupported` [S: VST3 SDK] |
 | Program list | — | `IUnitInfo` list and names; set the program-change parameter to `index / (count − 1)` |
 | Program change | MIDI program change on a note port with the MIDI dialect | `IMidiMapping::getMidiControllerAssignment(kCtrlProgramChange)` → parameter |

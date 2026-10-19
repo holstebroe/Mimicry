@@ -138,8 +138,11 @@ each loaded preset, reports what failed, and falls back to the user picking pres
 
 **Ladder** (02 §7 for the calls). Each step runs until it yields presets; `--method` forces one:
 
-1. Preset files the user names (`--from <file or folder>`): `.vstpreset`, CLAP state files,
-   `params.json`.
+1. Preset files and folders: the user's (`--from <file or folder>`: `.vstpreset`, CLAP state files,
+   `params.json`), the file locations and extensions a CLAP plugin declares through preset discovery,
+   and the standard VST3 preset folders for the plugin's vendor and name. Many plugins keep presets in
+   their own folder in their own format; with `--raw-files` such files are tried as state blobs, which
+   works only where the file is the plugin's state, and the verification below decides [I].
 2. The plugin's own catalogue: CLAP preset discovery + preset-load; VST3 `IProgramListData`.
 3. VST3 program lists through the program-change parameter.
 4. MIDI program change (CLAP MIDI on a note port; VST3 `IMidiMapping`), banks of 128 with bank select
@@ -155,19 +158,35 @@ probe signals) differs from the default render by more than the repeatability fl
 `load-error`, `timeout`. A method whose first presets are all `no-change` is abandoned and the report
 says so.
 
-**Manual capture** (`mimicry capture <plugin>`): the worker opens the plugin's editor in its own window
-(02 §3); the user browses presets in the plugin's own browser; a key or the small capture window saves
-the current state, parameter snapshot and a name (the plugin's program name when it has one, else typed
-or `capture-NNN`, plan OQ14). **Watch mode** (`--watch`) captures by itself when the plugin signals a
-preset change: a burst of parameter changes within 50 ms [D], a VST3 `restartComponent` with
-`kParamValuesChanged`, a CLAP parameter rescan of values, or a changed state hash polled every 500 ms
-[D] for plugins whose presets change hidden state only (plan OQ13). Each capture is verified and
-deduplicated as above, so the user can click through a whole bank with the plugin's own "next" arrow.
+**Names** come from the plugin where a format offers them: CLAP discovery metadata; VST3 program names
+(`IUnitInfo::getProgramName`) and the program-change parameter's value text; the file name for file
+presets. Otherwise a preset is `capture-NNN` (or `<method>-NNN`), and the user may rename it in
+`index.json` [D: owner, plan OQ14].
+
+**Manual capture** (`mimicry capture <plugin>`, **Windows only**, 02 §3): the worker opens the plugin's
+editor in its own window; the user browses presets in the plugin's own browser; a key or the small
+capture window saves the current state, parameter snapshot and a name. **Watch mode** (`--watch`)
+captures by itself when the plugin signals a preset change: CLAP `preset-load.loaded` called by the
+plugin (it also names the preset through the discovery index), an edit of the VST3 program-change
+parameter (its value text names the program), a burst of parameter changes within 50 ms [D], a VST3
+`restartComponent` with `kParamValuesChanged`, a CLAP parameter rescan of values, or a changed state
+hash polled every 500 ms [D] for plugins whose presets change hidden state only (plan OQ13). Each
+capture is verified and deduplicated as above, so the user can click through a whole bank with the
+plugin's own "next" arrow.
+
+**Taught click** (`mimicry capture --teach`, Windows) [A]: the user presses the plugin's own "next
+preset" button once. The worker records the click from the editor window's message hook: the child
+window under the cursor and the position relative to it, so it survives the window being moved. The
+click must change the state hash, else the user is asked to try again. Mimicry then replays it as posted
+`WM_LBUTTONDOWN`/`WM_LBUTTONUP` messages to that child window (no real mouse movement, no focus needed),
+or with `SendInput` on the editor brought to the front for plugins that ignore posted messages. After
+each click it waits for the change signal or a settle time, captures and verifies. It stops when a state
+hash repeats (the bank wrapped around), when 3 clicks in a row change nothing [D], or at `--max`. The
+click and its wait time are stored in the recipe.
 
 **Recipe**: the method that worked, with its details (program-change parameter id and count, MIDI bank
 layout, wait times), is stored in the plugin profile (01 §7), so the next harvest of the same plugin
-goes straight to it. Recipes are plain JSON and can be shared. Learning the editor's own "next preset"
-click and replaying it (plan WP7.5) would close the loop for plugins with no other method.
+goes straight to it, a taught click included. Recipes are plain JSON and can be shared.
 
 **Output**: `presets/<format>-<uid>-<hash>/` holds, per preset, `NNN-<name>.state`,
 `NNN-<name>.params.json`, and an `index.json` (name, method, ref, state hash, outcome), plus
