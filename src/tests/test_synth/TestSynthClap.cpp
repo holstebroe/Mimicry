@@ -2,10 +2,18 @@
 // table and the planted hazards are in TestSynthCore.hpp, shared with the VST3 build.
 
 #include <clap/clap.h>
+#include <clap/ext/preset-load.h>
+#include <clap/factory/preset-discovery.h>
 
+#include <atomic>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
+#include <fstream>
+#include <iterator>
+#include <mutex>
 #include <new>
+#include <string>
 #include <vector>
 
 #include "TestSynthCore.hpp"
@@ -26,8 +34,15 @@ struct Plugin {
     clap_plugin_t plugin{};
     const clap_host_t* host = nullptr;
     const clap_host_params_t* host_params = nullptr;
+    const clap_host_preset_load_t* host_preset_load = nullptr;
     Synth synth;
     bool processing = false;
+    // A preset-load request, run on the main thread from on_main_thread (an asynchronous load, as the CLAP
+    // spec allows: the host must wait for `loaded`).
+    std::mutex pending_mutex;
+    bool pending = false;
+    uint32_t pending_kind = 0;
+    std::string pending_location, pending_key;
 };
 
 Plugin* self(const clap_plugin_t* p) { return static_cast<Plugin*>(p->plugin_data); }
@@ -104,6 +119,7 @@ void handle_event(Plugin& pl, const clap_event_header_t* h) {
         }
         case CLAP_EVENT_MIDI: {
             const auto* e = reinterpret_cast<const clap_event_midi_t*>(h);
+            if ((e->data[0] & 0xF0) == 0xC0) pl.synth.load_factory(e->data[1]);  // the factory bank (T17)
             if ((e->data[0] & 0xF0) == 0xE0) {
                 const int v = (int(e->data[2]) << 7) | int(e->data[1]);  // 0..16383, centre 8192
                 pl.synth.pitch_bend(double(v - 8192) / 8192.0);
@@ -168,7 +184,8 @@ bool state_save(const clap_plugin_t* plugin, const clap_ostream_t* stream) {
     std::vector<char> buf(sizeof kStateMagic + kParamCount * sizeof(double));
     std::memcpy(buf.data(), kStateMagic, sizeof kStateMagic);
     for (uint32_t i = 0; i < kParamCount; ++i) {
-        const double v = pl.synth.value(static_cast<ParamId>(i));
+        // The meter is output, not state: a saved state must not depend on the last block played.
+        const double v = kParams[i].readonly ? kParams[i].def : pl.synth.value(static_cast<ParamId>(i));
         std::memcpy(buf.data() + sizeof kStateMagic + i * sizeof(double), &v, sizeof v);
     }
     int64_t done = 0;
@@ -180,15 +197,8 @@ bool state_save(const clap_plugin_t* plugin, const clap_ostream_t* stream) {
     return true;
 }
 
-bool state_load(const clap_plugin_t* plugin, const clap_istream_t* stream) {
-    Plugin& pl = *self(plugin);
-    std::vector<char> buf(sizeof kStateMagic + kParamCount * sizeof(double));
-    int64_t done = 0;
-    while (done < static_cast<int64_t>(buf.size())) {
-        const int64_t n = stream->read(stream, buf.data() + done, buf.size() - static_cast<uint64_t>(done));
-        if (n <= 0) return false;
-        done += n;
-    }
+bool state_from_bytes(Plugin& pl, const std::vector<char>& buf) {
+    if (buf.size() != sizeof kStateMagic + kParamCount * sizeof(double)) return false;
     if (std::memcmp(buf.data(), kStateMagic, sizeof kStateMagic) != 0) return false;
     // The program parameter would overwrite wave and cutoff, so set it first, then the rest.
     double program;
@@ -201,6 +211,17 @@ bool state_load(const clap_plugin_t* plugin, const clap_istream_t* stream) {
         pl.synth.set_param(i, v);
     }
     return true;
+}
+
+bool state_load(const clap_plugin_t* plugin, const clap_istream_t* stream) {
+    std::vector<char> buf(sizeof kStateMagic + kParamCount * sizeof(double));
+    int64_t done = 0;
+    while (done < static_cast<int64_t>(buf.size())) {
+        const int64_t n = stream->read(stream, buf.data() + done, buf.size() - static_cast<uint64_t>(done));
+        if (n <= 0) return false;
+        done += n;
+    }
+    return state_from_bytes(*self(plugin), buf);
 }
 
 const clap_plugin_state_t kState = {state_save, state_load};
@@ -220,6 +241,54 @@ const clap_plugin_render_t kRender = {render_hard_realtime, render_set};
 uint32_t latency_get(const clap_plugin_t*) { return 0; }
 const clap_plugin_latency_t kLatency = {latency_get};
 
+// --- preset-load (T17) -----------------------------------------------------------------------
+
+// A preset file (MIMICRY_TEST_PRESET_DIR, extension .mtspreset) is a state blob.
+constexpr const char* kPresetExtension = "mtspreset";
+
+bool preset_from_location(const clap_plugin_t* plugin, uint32_t kind, const char* location, const char* key) {
+    Plugin& pl = *self(plugin);
+    if (kind != CLAP_PRESET_DISCOVERY_LOCATION_PLUGIN && kind != CLAP_PRESET_DISCOVERY_LOCATION_FILE) return false;
+    if (kind == CLAP_PRESET_DISCOVERY_LOCATION_FILE && !location) return false;
+    {
+        std::lock_guard lock(pl.pending_mutex);
+        pl.pending = true;
+        pl.pending_kind = kind;
+        pl.pending_location = location ? location : "";
+        pl.pending_key = key ? key : "";
+    }
+    if (pl.host && pl.host->request_callback) pl.host->request_callback(pl.host);
+    return true;
+}
+
+const clap_plugin_preset_load_t kPresetLoad = {preset_from_location};
+
+void run_pending_preset(Plugin& pl) {
+    uint32_t kind;
+    std::string location, key;
+    {
+        std::lock_guard lock(pl.pending_mutex);
+        if (!pl.pending) return;
+        pl.pending = false;
+        kind = pl.pending_kind;
+        location = pl.pending_location;
+        key = pl.pending_key;
+    }
+    const char* loc = kind == CLAP_PRESET_DISCOVERY_LOCATION_FILE ? location.c_str() : nullptr;
+    const char* k = key.empty() ? nullptr : key.c_str();
+    bool ok = false;
+    if (kind == CLAP_PRESET_DISCOVERY_LOCATION_PLUGIN) {
+        ok = k && pl.synth.load_factory(std::atoi(k));
+    } else {
+        std::ifstream f(location, std::ios::binary);
+        const std::vector<char> buf((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+        ok = f.good() || f.eof() ? state_from_bytes(pl, buf) : false;
+    }
+    if (!pl.host_preset_load) return;
+    if (ok) pl.host_preset_load->loaded(pl.host, kind, loc, k);
+    else pl.host_preset_load->on_error(pl.host, kind, loc, k, 0, "no such preset");
+}
+
 // --- plugin ----------------------------------------------------------------------------------
 
 bool plugin_init(const clap_plugin_t* plugin) {
@@ -230,6 +299,7 @@ bool plugin_init(const clap_plugin_t* plugin) {
     // A rescan belongs on the main thread; the hazard calls it from wherever the value arrives, which both
     // Mimicry's CLAP host and clap-wrapper handle synchronously.
     pl.host_params = pl.host ? static_cast<const clap_host_params_t*>(pl.host->get_extension(pl.host, CLAP_EXT_PARAMS)) : nullptr;
+    pl.host_preset_load = pl.host ? static_cast<const clap_host_preset_load_t*>(pl.host->get_extension(pl.host, CLAP_EXT_PRESET_LOAD)) : nullptr;
     pl.synth.on_rename = [&pl] {
         if (pl.host_params && pl.host_params->rescan) pl.host_params->rescan(pl.host, CLAP_PARAM_RESCAN_INFO);
     };
@@ -298,10 +368,11 @@ const void* plugin_get_extension(const clap_plugin_t*, const char* id) {
     if (!std::strcmp(id, CLAP_EXT_LATENCY)) return &kLatency;
     if (!std::strcmp(id, CLAP_EXT_RENDER)) return &kRender;
     if (!std::strcmp(id, kPluginAsVst3)) return &kAsVst3;
+    if (!std::strcmp(id, CLAP_EXT_PRESET_LOAD)) return &kPresetLoad;
     return nullptr;
 }
 
-void plugin_on_main_thread(const clap_plugin_t*) {}
+void plugin_on_main_thread(const clap_plugin_t* plugin) { run_pending_preset(*self(plugin)); }
 
 // --- factory ---------------------------------------------------------------------------------
 
@@ -325,12 +396,79 @@ const clap_plugin_t* factory_create(const clap_plugin_factory_t*, const clap_hos
 
 const clap_plugin_factory_t kFactory = {factory_count, factory_descriptor, factory_create};
 
+// --- preset discovery (T17) ------------------------------------------------------------------
+// One provider: the factory bank as a plugin location (load key = index), and the folder in the environment
+// variable MIMICRY_TEST_PRESET_DIR, if set, as a file location of .mtspreset files.
+
+const clap_preset_discovery_provider_descriptor_t kProviderDesc = {CLAP_VERSION_INIT, "org.mimicry.test-synth.presets",
+                                                                   "Mimicry Test Synth presets", "Mimicry"};
+
+struct Provider {
+    clap_preset_discovery_provider_t provider{};
+    const clap_preset_discovery_indexer_t* indexer = nullptr;
+};
+
+bool provider_init(const clap_preset_discovery_provider_t* p) {
+    const auto* ix = static_cast<Provider*>(p->provider_data)->indexer;
+    const clap_preset_discovery_location_t factory{CLAP_PRESET_DISCOVERY_IS_FACTORY_CONTENT, "Factory",
+                                                   CLAP_PRESET_DISCOVERY_LOCATION_PLUGIN, nullptr};
+    ix->declare_location(ix, &factory);
+    if (const char* dir = std::getenv("MIMICRY_TEST_PRESET_DIR"); dir && *dir) {
+        const clap_preset_discovery_filetype_t ft{"Mimicry test preset", "", kPresetExtension};
+        ix->declare_filetype(ix, &ft);
+        const clap_preset_discovery_location_t user{CLAP_PRESET_DISCOVERY_IS_USER_CONTENT, "User",
+                                                    CLAP_PRESET_DISCOVERY_LOCATION_FILE, dir};
+        ix->declare_location(ix, &user);
+    }
+    return true;
+}
+
+void provider_destroy(const clap_preset_discovery_provider_t* p) { delete static_cast<Provider*>(p->provider_data); }
+
+bool provider_get_metadata(const clap_preset_discovery_provider_t*, uint32_t kind, const char* location,
+                           const clap_preset_discovery_metadata_receiver_t* r) {
+    const clap_universal_plugin_id_t id{"clap", kPluginId};
+    if (kind == CLAP_PRESET_DISCOVERY_LOCATION_PLUGIN) {
+        for (int i = 0; i < kFactoryCount; ++i) {
+            const std::string key = std::to_string(i);
+            if (!r->begin_preset(r, kFactoryBank[i].name, key.c_str())) break;
+            r->add_plugin_id(r, &id);
+            r->set_flags(r, CLAP_PRESET_DISCOVERY_IS_FACTORY_CONTENT);
+        }
+        return true;
+    }
+    if (!location) return false;
+    // One preset per file: the host names it after the file when the name is null.
+    if (r->begin_preset(r, nullptr, nullptr)) r->add_plugin_id(r, &id);
+    return true;
+}
+
+const void* provider_get_extension(const clap_preset_discovery_provider_t*, const char*) { return nullptr; }
+
+uint32_t discovery_count(const clap_preset_discovery_factory_t*) { return 1; }
+const clap_preset_discovery_provider_descriptor_t* discovery_descriptor(const clap_preset_discovery_factory_t*, uint32_t i) {
+    return i == 0 ? &kProviderDesc : nullptr;
+}
+const clap_preset_discovery_provider_t* discovery_create(const clap_preset_discovery_factory_t*,
+                                                         const clap_preset_discovery_indexer_t* indexer, const char* id) {
+    if (!id || std::strcmp(id, kProviderDesc.id) != 0) return nullptr;
+    auto* pr = new (std::nothrow) Provider;
+    if (!pr) return nullptr;
+    pr->indexer = indexer;
+    pr->provider = {&kProviderDesc, pr, provider_init, provider_destroy, provider_get_metadata, provider_get_extension};
+    return &pr->provider;
+}
+
+const clap_preset_discovery_factory_t kDiscovery = {discovery_count, discovery_descriptor, discovery_create};
+
 bool entry_init(const char*) { return true; }
 
 void entry_deinit() {}
 
 const void* entry_get_factory(const char* id) {
-    return std::strcmp(id, CLAP_PLUGIN_FACTORY_ID) == 0 ? &kFactory : nullptr;
+    if (std::strcmp(id, CLAP_PLUGIN_FACTORY_ID) == 0) return &kFactory;
+    if (std::strcmp(id, CLAP_PRESET_DISCOVERY_FACTORY_ID) == 0) return &kDiscovery;
+    return nullptr;
 }
 
 }  // namespace

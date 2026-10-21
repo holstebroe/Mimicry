@@ -5,8 +5,12 @@
 #include <algorithm>
 #include <atomic>
 #include <cmath>
+#include <cctype>
 #include <cstring>
+#include <filesystem>
 #include <format>
+#include <fstream>
+#include <iterator>
 #include <mutex>
 #include <optional>
 #include <thread>
@@ -255,19 +259,7 @@ public:
         };
         std::vector<std::uint8_t> comp, ctrl;
         if (!take(comp) || !take(ctrl)) return unexpected(HostError{"state blob is malformed"});
-        {
-            MemoryStream s(comp.data(), static_cast<TSize>(comp.size()));
-            if (component_->setState(&s) != kResultOk) return unexpected(HostError{"component setState failed"});
-            if (controller_) {
-                MemoryStream again(comp.data(), static_cast<TSize>(comp.size()));
-                controller_->setComponentState(&again);
-            }
-        }
-        if (controller_ && !ctrl.empty()) {
-            MemoryStream s(ctrl.data(), static_cast<TSize>(ctrl.size()));
-            controller_->setState(&s);
-        }
-        return {};
+        return load_component(comp, ctrl);
     }
 
     bool rescan_parameters() override {
@@ -281,6 +273,78 @@ public:
     }
 
     bool take_restart_request() override { return handler_.restart.exchange(false); }
+
+    // --- presets (docs/spec/02_HOSTING.md section 7) ---
+
+    // Every IUnitInfo program list: as program data when the component supports IProgramListData for it,
+    // and as a program list when a program-change parameter drives it (the parameter of the unit that names
+    // the list; clap-wrapper uses the list id as the parameter id).
+    std::vector<PresetRef> presets() override {
+        std::vector<PresetRef> out;
+        if (!unit_info_) return out;
+        FUnknownPtr<IProgramListData> data(component_);
+        for (int32 li = 0; li < unit_info_->getProgramListCount(); ++li) {
+            ProgramListInfo list{};
+            if (unit_info_->getProgramListInfo(li, list) != kResultOk || list.programCount <= 0) continue;
+            std::optional<ParamID> param;
+            for (int32 ui = 0; ui < unit_info_->getUnitCount() && !param; ++ui) {
+                UnitInfo unit{};
+                if (unit_info_->getUnitInfo(ui, unit) != kResultOk || unit.programListId != list.id) continue;
+                for (int32 pi = 0; pi < controller_->getParameterCount(); ++pi) {
+                    ParameterInfo info{};
+                    if (controller_->getParameterInfo(pi, info) == kResultOk && (info.flags & ParameterInfo::kIsProgramChange) &&
+                        info.unitId == unit.id) {
+                        param = info.id;
+                        break;
+                    }
+                }
+            }
+            if (!param && index_.count(static_cast<std::uint32_t>(list.id))) param = static_cast<ParamID>(list.id);
+            const bool with_data = data && data->programDataSupported(list.id) == kResultTrue;
+            for (int32 i = 0; i < list.programCount; ++i) {
+                PresetRef r;
+                String128 name{};
+                if (unit_info_->getProgramName(list.id, i, name) == kResultOk) r.name = utf8(name);
+                r.list_id = static_cast<std::uint32_t>(list.id);
+                r.index = i;
+                r.count = list.programCount;
+                if (with_data) {
+                    r.method = PresetMethod::ProgramData;
+                    out.push_back(r);
+                }
+                if (param) {
+                    r.method = PresetMethod::ProgramList;
+                    r.param_id = *param;
+                    out.push_back(r);
+                }
+            }
+        }
+        return out;
+    }
+
+    expected<void, HostError> load_preset(const PresetRef& ref) override {
+        if (ref.method == PresetMethod::ProgramData) {
+            FUnknownPtr<IProgramListData> data(component_);
+            if (!data) return unexpected(HostError{"the component has no IProgramListData"});
+            MemoryStream stream;
+            if (data->getProgramData(static_cast<ProgramListID>(ref.list_id), ref.index, &stream) != kResultOk)
+                return unexpected(HostError{std::format("getProgramData({}, {}) failed", ref.list_id, ref.index)});
+            // The program's data is a component state [I]: load it and mirror it on the controller.
+            const auto* p = reinterpret_cast<const std::uint8_t*>(stream.getData());
+            return load_component(std::vector<std::uint8_t>(p, p + stream.getSize()), {});
+        }
+        if (ref.method == PresetMethod::File) {
+            std::string ext = std::filesystem::path(ref.location).extension().string();
+            std::ranges::transform(ext, ext.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+            if (ext == ".vstpreset") return load_vstpreset(ref.location);
+        }
+        return Engine::load_preset(ref);
+    }
+
+    std::optional<double> param_coord(std::uint32_t id) const override {
+        if (!controller_ || !index_.count(id)) return std::nullopt;
+        return controller_->getParamNormalized(id);
+    }
 
     void apply_controller_values(std::span<const mimicry::host::ParamValue> values) override {
         if (!controller_) return;
@@ -387,6 +451,66 @@ public:
     int latency_samples() const override { return static_cast<int>(processor_->getLatencySamples()); }
 
 private:
+    // Component state into the component and the controller (setComponentState), then the controller's own.
+    expected<void, HostError> load_component(std::vector<std::uint8_t> comp, std::vector<std::uint8_t> ctrl) {
+        {
+            MemoryStream s(comp.data(), static_cast<TSize>(comp.size()));
+            if (component_->setState(&s) != kResultOk) return unexpected(HostError{"component setState failed"});
+            if (controller_) {
+                MemoryStream again(comp.data(), static_cast<TSize>(comp.size()));
+                controller_->setComponentState(&again);
+            }
+        }
+        if (controller_ && !ctrl.empty()) {
+            MemoryStream s(ctrl.data(), static_cast<TSize>(ctrl.size()));
+            controller_->setState(&s);
+        }
+        return {};
+    }
+
+    // A .vstpreset file [S: VST3 SDK vstpresetfile.h]: "VST3", int32 version, 32 ASCII class id, int64 offset
+    // of the chunk list; the list is "List", int32 count, then per entry a 4-character id, int64 offset and
+    // int64 size. 'Comp' is the component state, 'Cont' the controller state. All little-endian.
+    expected<void, HostError> load_vstpreset(const std::string& path) {
+        std::ifstream f(path, std::ios::binary);
+        if (!f) return unexpected(HostError{std::format("cannot read '{}'", path)});
+        const std::vector<std::uint8_t> b((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+        auto le = [&](std::size_t at, int bytes) -> std::uint64_t {
+            std::uint64_t v = 0;
+            for (int i = 0; i < bytes; ++i) v |= static_cast<std::uint64_t>(b[at + static_cast<std::size_t>(i)]) << (8 * i);
+            return v;
+        };
+        constexpr std::size_t kHeader = 4 + 4 + 32 + 8;
+        if (b.size() < kHeader || std::memcmp(b.data(), "VST3", 4) != 0) return unexpected(HostError{"not a .vstpreset file"});
+        std::string cls(reinterpret_cast<const char*>(b.data() + 8), 32);
+        auto upper = [](std::string t) {
+            std::ranges::transform(t, t.begin(), [](unsigned char c) { return static_cast<char>(std::toupper(c)); });
+            return t;
+        };
+        if (upper(cls) != upper(info_.uid))
+            return unexpected(HostError{std::format("the preset is for class {}, the plugin is {}", cls, info_.uid)});
+        const std::uint64_t list = le(40, 8);
+        if (list + 8 > b.size() || std::memcmp(b.data() + list, "List", 4) != 0) return unexpected(HostError{"bad chunk list"});
+        const auto count = static_cast<std::size_t>(le(static_cast<std::size_t>(list) + 4, 4));
+        std::vector<std::uint8_t> comp, ctrl;
+        bool have_comp = false;
+        for (std::size_t i = 0; i < count; ++i) {
+            const std::size_t e = static_cast<std::size_t>(list) + 8 + i * 20;
+            if (e + 20 > b.size()) return unexpected(HostError{"bad chunk list"});
+            const std::uint64_t off = le(e + 4, 8), size = le(e + 12, 8);
+            if (off + size > b.size()) return unexpected(HostError{"chunk outside the file"});
+            std::vector<std::uint8_t> chunk(b.begin() + static_cast<std::ptrdiff_t>(off), b.begin() + static_cast<std::ptrdiff_t>(off + size));
+            if (std::memcmp(b.data() + e, "Comp", 4) == 0) {
+                comp = std::move(chunk);
+                have_comp = true;
+            } else if (std::memcmp(b.data() + e, "Cont", 4) == 0) {
+                ctrl = std::move(chunk);
+            }
+        }
+        if (!have_comp) return unexpected(HostError{"the preset has no component state"});
+        return load_component(std::move(comp), std::move(ctrl));
+    }
+
     std::string unit_path(UnitID id) const {
         std::string path;
         for (int guard = 0; unit_info_ && id != kRootUnitId && guard < 16; ++guard) {

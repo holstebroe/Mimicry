@@ -136,13 +136,41 @@ private:
             if (auto r = instance_->load_state(std::vector<std::uint8_t>(p, p + n)); !r) return error_reply(r.error().message);
             return ok_reply();
         }
-        if (cmd == "render") return render(msg["job"]);
+        if (cmd == "render") return render(msg["job"], static_cast<std::size_t>(msg["state_bytes"].as_number()));
+        if (cmd == "presets") {
+            auto list = instance_->presets();
+            if (!list) return error_reply(list.error().message);
+            json::Array out;
+            for (const auto& r : *list) out.push_back(host::to_json(r));
+            json::Value v = ok_reply();
+            v.set("presets", std::move(out));
+            return v;
+        }
+        if (cmd == "apply_preset") {
+            auto ref = host::preset_from_json(msg["ref"]);
+            if (!ref) return error_reply(ref.error());
+            auto cap = instance_->apply_preset(*ref, msg["wait_ms"].as_number(200));
+            if (!cap) return error_reply(cap.error().message);
+            if (cap->state.size() > payload_) return error_reply("state larger than the shared memory");
+            std::memcpy(shm_.data(), cap->state.data(), cap->state.size());
+            json::Array coords;
+            for (double c : cap->coords) coords.emplace_back(c);
+            json::Value v = ok_reply();
+            v.set("bytes", cap->state.size()).set("coords", std::move(coords)).set("name", cap->name)
+                .set("version", static_cast<double>(instance_->parameters_version()));
+            return v;
+        }
         return error_reply(std::format("unknown command '{}'", cmd));
     }
 
-    json::Value render(const json::Value& job_json) {
+    json::Value render(const json::Value& job_json, std::size_t state_bytes) {
         auto job = host::job_from_json(job_json);
         if (!job) return error_reply(job.error());
+        if (state_bytes > payload_) return error_reply("state larger than the shared memory");
+        if (state_bytes) {  // a source render from a harvested state, passed in the shared memory
+            const auto* p = static_cast<const std::uint8_t*>(shm_.data());
+            job->state.assign(p, p + state_bytes);
+        }
         std::atomic_ref<std::uint64_t>(*blocks_).store(0);
         auto audio = instance_->render(*job);
         json::Value v = ok_reply();

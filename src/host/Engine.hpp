@@ -8,6 +8,7 @@
 
 #include <atomic>
 #include <memory>
+#include <optional>
 #include <span>
 #include <string>
 #include <thread>
@@ -45,6 +46,17 @@ struct Block {
     int frames = 0;
     std::span<const ParamValue> params;  // applied at frame 0
     std::span<const NoteEvent> notes;    // sorted by frame
+    // >= 0: a MIDI program change at frame 0, channel 0, after bank select when `bank` >= 0. Only preset
+    // jobs set it (spec 05 section 9); a backend without a MIDI path ignores it.
+    int program = -1;
+    int bank = -1;
+};
+
+// Where an asynchronous preset load stands (CLAP preset-load reports through the host's `loaded` /
+// `on_error`; everything else finishes inside the call).
+struct PresetLoadStatus {
+    bool pending = false;
+    std::string error;  // non-empty once the plugin reported a failure
 };
 
 class Engine {
@@ -69,6 +81,21 @@ public:
     virtual void apply_controller_values(std::span<const ParamValue>) {}
     // Runs plugin callbacks that were requested for the main thread (clap on_main_thread, VST3 runloop).
     virtual void pump_main_thread() {}
+
+    // Presets (docs/spec/02_HOSTING.md section 7), main thread. `presets` lists what the format can name:
+    // CLAP discovery, VST3 program lists and program data, MIDI program change. Program parameters are
+    // added by the render core from the table, for both formats alike.
+    [[nodiscard]] virtual std::vector<PresetRef> presets() { return {}; }
+    // Loads a preset that needs no processing: a file (the default reads it and calls load_state), a CLAP
+    // preset-load, VST3 program data. Methods that need a processed block (program list, MIDI program,
+    // program parameter) are the render core's.
+    [[nodiscard]] virtual expected<void, HostError> load_preset(const PresetRef& ref);
+    [[nodiscard]] virtual PresetLoadStatus preset_status() { return {}; }
+    // The plugin's current value of a parameter in the Mimicry coordinate (CLAP get_value, VST3
+    // getParamNormalized), main thread.
+    [[nodiscard]] virtual std::optional<double> param_coord(std::uint32_t id) const = 0;
+    // True if Block::program reaches the plugin.
+    [[nodiscard]] virtual bool midi_program_change() const { return false; }
 
     // render thread
     [[nodiscard]] virtual expected<void, HostError> start() = 0;

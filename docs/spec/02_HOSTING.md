@@ -12,8 +12,8 @@ PluginHost::open(path, plugin_uid)        -> expected<Instance, HostError>     /
 Instance::info()                          -> { format, uid, name, vendor, version hash, kind }
 Instance::parameters()                    -> vector<ParamDesc>
 Instance::value_text(id, coord)           -> string                            // for units and semantics
-Instance::presets()                       -> vector<PresetRef>                 // factory programs / files (§7)
-Instance::apply_preset(ref)               -> expected<Captured, HostError>     // state blob + parameter snapshot (§7)
+Instance::presets()                       -> expected<vector<PresetRef>>       // what the plugin declares (§7)
+Instance::apply_preset(ref, wait_ms)      -> expected<CapturedPreset>          // state blob + parameter snapshot (§7)
 Instance::open_editor() / close_editor()  -> expected<void>                    // capture only, Windows (§3, 06 §6)
 Instance::render(Job)                     -> expected<Audio, Outcome>          // 05 §2 outcome codes
 Instance::save_state() / load_state(blob) -> expected<Blob / void>
@@ -188,6 +188,29 @@ and a name when the plugin has one. Methods per format, in the order the harvest
 
 A source render then uses `Job.state` instead of `coords`: reset, `load_state(blob)`, settle, notes or
 input. It still starts from a complete state after a reset (CLAUDE.md rule 5).
+
+Implemented [A] (WP5.8a), in the shared render core for both formats:
+- `presets()` returns what the backend can name (CLAP: every preset-discovery provider's plugin locations,
+  and the files of its file locations with the declared extensions, kept unless they name only other
+  plugins; MIDI program change 0-127 when the note port has the MIDI dialect. VST3: every `IUnitInfo`
+  program list, as program data when `programDataSupported`, and as a program list when a
+  `kIsProgramChange` parameter of the unit that names the list drives it, or a parameter whose id is the
+  list id, as clap-wrapper builds it [I]); the render core adds one preset per value of every stepped
+  program-change parameter that no program list drives (the heuristic step), for both formats alike.
+- `apply_preset(ref, wait_ms)` resets and reloads the clean snapshot first, so no preset inherits the
+  previous one. File, CLAP preset and program-data loads are main-thread calls; the core then pumps until
+  `loaded` / `on_error`, at most `10 × wait_ms` [D] (a plugin need not call `loaded`), and processes
+  `wait_ms` of silence. Program lists and program parameters send the program-change parameter (the one
+  place it is sent, 05 §9) in block 0 of `wait_ms` of silence; MIDI program change goes in block 0 as
+  `Block::program` (bank select CC 0 / CC 32 before it when a bank is given). The capture is
+  `save_state()`, then `load_state()` of that blob (it must load on its own, and a separate VST3
+  controller is brought in line by `setComponentState`), then every parameter read back (CLAP
+  `params.get_value`, VST3 `getParamNormalized`). The instance returns to its clean snapshot afterwards.
+- VST3 program data is loaded as a component state [I] (`getProgramData` into `setState` +
+  `setComponentState`). `.vstpreset` files are read in the VST3 backend (chunk list, `Comp` and `Cont`,
+  class id checked) [S: VST3 SDK]; other files go to `load_state` as they are.
+- Through the worker, `Job.state` and the captured blob travel in the shared memory (`state_bytes`), not
+  in the JSON line; the render cache keys on the whole blob.
 
 ## 8. Build
 

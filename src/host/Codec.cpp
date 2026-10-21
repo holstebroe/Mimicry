@@ -104,6 +104,32 @@ ParamDesc param_from_json(const json::Value& v) {
     return p;
 }
 
+json::Value to_json(const PresetRef& ref) {
+    json::Value v;
+    v.set("method", std::string(to_string(ref.method))).set("name", ref.name).set("location", ref.location)
+        .set("load_key", ref.load_key).set("location_is_file", ref.location_is_file).set("list_id", ref.list_id)
+        .set("param_id", ref.param_id).set("index", ref.index).set("count", ref.count).set("bank", ref.bank);
+    return v;
+}
+
+expected<PresetRef, std::string> preset_from_json(const json::Value& v) {
+    if (!v.is_object()) return unexpected(std::string("preset: not an object"));
+    const auto method = parse_preset_method(v["method"].as_string());
+    if (!method) return unexpected(std::format("preset: unknown method '{}'", v["method"].as_string()));
+    PresetRef r;
+    r.method = *method;
+    r.name = v["name"].as_string();
+    r.location = v["location"].as_string();
+    r.load_key = v["load_key"].as_string();
+    r.location_is_file = v["location_is_file"].as_bool();
+    r.list_id = static_cast<std::uint32_t>(v["list_id"].as_number());
+    r.param_id = static_cast<std::uint32_t>(v["param_id"].as_number());
+    r.index = static_cast<int>(v["index"].as_number());
+    r.count = static_cast<int>(v["count"].as_number());
+    r.bank = static_cast<int>(v["bank"].as_number(-1));
+    return r;
+}
+
 expected<Outcome, std::string> outcome_from_string(std::string_view name) {
     for (const Outcome o : {Outcome::Ok, Outcome::Silent, Outcome::NonFinite, Outcome::Overload, Outcome::DcRunaway,
                             Outcome::HostError, Outcome::Timeout, Outcome::Crash})
