@@ -88,6 +88,7 @@ private:
     std::string message_;
     std::vector<std::uint8_t> clean_;  // state right after the first activation
     bool have_clean_ = false;
+    bool preset_unreported_ = false;  // the last asynchronous preset load ended without loaded / on_error
     std::uint64_t* blocks_ = nullptr;
 };
 

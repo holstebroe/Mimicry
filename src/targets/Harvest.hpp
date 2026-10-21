@@ -37,7 +37,7 @@ struct HarvestOptions {
     double wait_ms = 200;                      // after each load (spec 02 section 7)
     int max_presets = 0;                       // ok presets to collect, 0 = all
     int abandon_after = 3;                     // a method whose first N presets are all no-change is abandoned [D]
-    int stop_after = 8;                        // blind methods: N no-change in a row end the bank [D]
+    int stop_after = 8;                        // MIDI program change: N empty slots in a row end the bank [D]
     std::function<void(const struct HarvestEntry&)> progress;
 };
 
@@ -66,6 +66,7 @@ struct HarvestResult {
     std::optional<opt::HarvestRecipe> recipe;  // the method that yielded presets (the first one, by ladder order)
     double floor = 0;                          // render difference between two renders of the defaults
     double threshold = 0;                      // "same sound" below this
+    std::string listing_error;                 // the plugin's preset listing failed (file presets were still tried)
     [[nodiscard]] int ok_count() const;
 };
 

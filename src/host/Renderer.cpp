@@ -249,16 +249,26 @@ expected<CapturedPreset, HostError> Renderer::apply_preset(const PresetRef& ref,
             loaded = guarded("load_preset", [&] { return engine_->load_preset(ref); });
             if (!loaded) break;
             // An asynchronous load (CLAP preset-load) reports `loaded` or `on_error` on the main thread. A plugin
-            // need not report at all, so after the wait the load is taken as done [D].
-            const auto until = std::chrono::steady_clock::now() + std::chrono::duration<double, std::milli>(std::max(wait_ms, 1.0) * 10);
+            // need not report at all, so after the wait the load is taken as done [D]. The wait is 10 × wait_ms
+            // until a load ends unreported; from then on only wait_ms, until the plugin reports again [D].
+            const double factor = preset_unreported_ ? 1.0 : 10.0;
+            const auto until = std::chrono::steady_clock::now() + std::chrono::duration<double, std::milli>(std::max(wait_ms, 1.0) * factor);
             for (;;) {
                 pump();
                 const PresetLoadStatus st = engine_->preset_status();
                 if (!st.error.empty()) {
                     loaded = unexpected(HostError{"the plugin reported a load error: " + st.error});
+                    preset_unreported_ = false;
                     break;
                 }
-                if (!st.pending || std::chrono::steady_clock::now() >= until) break;
+                if (!st.pending) {
+                    preset_unreported_ = false;
+                    break;
+                }
+                if (std::chrono::steady_clock::now() >= until) {
+                    preset_unreported_ = true;
+                    break;
+                }
                 std::this_thread::sleep_for(std::chrono::milliseconds(2));
             }
             if (loaded) loaded = run_silence(wait_frames, {}, -1, -1);

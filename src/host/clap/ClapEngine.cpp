@@ -249,12 +249,20 @@ public:
     }
 
     expected<void, HostError> load_preset(const PresetRef& ref) override {
+        {  // every load starts clean: an earlier load's error, pending flag or late callback never carries over
+            std::lock_guard lock(preset_mutex_);
+            preset_pending_ = false;
+            preset_error_.clear();
+            preset_location_.clear();
+            preset_key_.clear();
+        }
         if (ref.method != PresetMethod::ClapPreset) return Engine::load_preset(ref);
         if (!preset_load_ || !preset_load_->from_location) return unexpected(HostError{"the plugin has no preset-load extension"});
         {
             std::lock_guard lock(preset_mutex_);
             preset_pending_ = true;
-            preset_error_.clear();
+            preset_location_ = ref.location_is_file ? ref.location : std::string();
+            preset_key_ = ref.load_key;
         }
         const uint32_t kind = ref.location_is_file ? CLAP_PRESET_DISCOVERY_LOCATION_FILE : CLAP_PRESET_DISCOVERY_LOCATION_PLUGIN;
         if (!preset_load_->from_location(plugin_, kind, ref.location_is_file ? ref.location.c_str() : nullptr,
@@ -611,15 +619,22 @@ private:
     static void params_clear(const clap_host_t*, clap_id, clap_param_clear_flags) {}
     static void params_request_flush(const clap_host_t*) {}
     static void state_mark_dirty(const clap_host_t*) {}
-    static void preset_on_error(const clap_host_t* h, uint32_t, const char*, const char*, int32_t, const char* msg) {
+    // A callback counts only for the load in flight: one arriving late for an earlier preset is ignored.
+    bool current_preset(const char* location, const char* key) const {
+        if (!preset_pending_ || preset_key_ != (key ? key : "")) return false;
+        return preset_location_.empty() || preset_location_ == (location ? location : "");
+    }
+    static void preset_on_error(const clap_host_t* h, uint32_t, const char* location, const char* key, int32_t, const char* msg) {
         auto* e = self(h);
         std::lock_guard lock(e->preset_mutex_);
+        if (!e->current_preset(location, key)) return;
         e->preset_pending_ = false;
         e->preset_error_ = msg && *msg ? msg : "unknown error";
     }
-    static void preset_loaded(const clap_host_t* h, uint32_t, const char*, const char*) {
+    static void preset_loaded(const clap_host_t* h, uint32_t, const char* location, const char* key) {
         auto* e = self(h);
         std::lock_guard lock(e->preset_mutex_);
+        if (!e->current_preset(location, key)) return;
         e->preset_pending_ = false;
     }
     static void latency_changed(const clap_host_t*) {}
@@ -683,6 +698,7 @@ private:
     std::mutex preset_mutex_;
     bool preset_pending_ = false;
     std::string preset_error_;
+    std::string preset_location_, preset_key_;  // the load in flight
     std::mutex log_mutex_;
     std::deque<std::string> log_;
 };

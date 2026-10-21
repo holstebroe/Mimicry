@@ -490,7 +490,7 @@ private:
         if (upper(cls) != upper(info_.uid))
             return unexpected(HostError{std::format("the preset is for class {}, the plugin is {}", cls, info_.uid)});
         const std::uint64_t list = le(40, 8);
-        if (list + 8 > b.size() || std::memcmp(b.data() + list, "List", 4) != 0) return unexpected(HostError{"bad chunk list"});
+        if (list > b.size() || b.size() - list < 8 || std::memcmp(b.data() + list, "List", 4) != 0) return unexpected(HostError{"bad chunk list"});
         const auto count = static_cast<std::size_t>(le(static_cast<std::size_t>(list) + 4, 4));
         std::vector<std::uint8_t> comp, ctrl;
         bool have_comp = false;
@@ -498,7 +498,7 @@ private:
             const std::size_t e = static_cast<std::size_t>(list) + 8 + i * 20;
             if (e + 20 > b.size()) return unexpected(HostError{"bad chunk list"});
             const std::uint64_t off = le(e + 4, 8), size = le(e + 12, 8);
-            if (off + size > b.size()) return unexpected(HostError{"chunk outside the file"});
+            if (off > b.size() || size > b.size() - off) return unexpected(HostError{"chunk outside the file"});
             std::vector<std::uint8_t> chunk(b.begin() + static_cast<std::ptrdiff_t>(off), b.begin() + static_cast<std::ptrdiff_t>(off + size));
             if (std::memcmp(b.data() + e, "Comp", 4) == 0) {
                 comp = std::move(chunk);

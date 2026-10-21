@@ -61,8 +61,9 @@ std::string lower(std::string s) {
     return s;
 }
 
-// Methods that cannot say which slots hold a preset: a run of empty slots ends the bank.
-bool blind(PresetMethod m) { return m == PresetMethod::MidiProgram || m == PresetMethod::ProgramList || m == PresetMethod::ProgramData; }
+// Methods that cannot say how many slots exist: a run of empty slots ends the bank. Program lists and
+// program data report their program count, so every slot is tried.
+bool blind(PresetMethod m) { return m == PresetMethod::MidiProgram; }
 
 // The standard VST3 preset folders of a plugin [S: VST3 SDK, "Preset Locations"]: user, then shared.
 std::vector<fs::path> vst3_preset_folders(const host::PluginInfo& info) {
@@ -170,6 +171,7 @@ expected<HarvestResult, std::string> harvest(host::Instance& inst, const Harvest
     // The defaults: reference sound, floor, and the state a preset must differ from.
     const Rendered def = render(plan), def2 = render(plan);
     if (!def.ok) return unexpected("the defaults do not render (" + def.why + ")");
+    if (!def2.ok) return unexpected("the defaults render once but not twice (" + def2.why + ")");
     result.floor = difference(def, def2);
     result.threshold = std::max(2.0 * result.floor, 0.15);  // as the probe's "same sound" [D]
     std::string default_hash;
@@ -179,6 +181,7 @@ expected<HarvestResult, std::string> harvest(host::Instance& inst, const Harvest
     std::vector<host::PresetRef> refs = file_presets(options, inst.info());
     auto listed = inst.presets();
     if (listed) refs.insert(refs.end(), listed->begin(), listed->end());
+    else result.listing_error = listed.error().message;  // reported, not dropped (rule 6)
     std::vector<PresetMethod> order;
     for (const auto& r : refs)
         if (std::ranges::find(order, r.method) == order.end()) order.push_back(r.method);
@@ -201,14 +204,12 @@ expected<HarvestResult, std::string> harvest(host::Instance& inst, const Harvest
         MethodReport rep;
         rep.method = method;
         std::vector<host::PresetRef> mine;
-        for (const auto& r : refs) {
-            if (r.method != method) continue;
-            // A recipe names the program parameter or list that worked; others of the same method come later.
-            if (from_recipe && (method == PresetMethod::ProgramList || method == PresetMethod::ProgramParam) &&
-                r.param_id != options.recipe->param_id)
-                continue;
-            mine.push_back(r);
-        }
+        for (const auto& r : refs)
+            if (r.method == method) mine.push_back(r);
+        // A recipe names the program parameter or list that worked: its presets first, the others after.
+        if (from_recipe && (method == PresetMethod::ProgramList || method == PresetMethod::ProgramParam))
+            std::ranges::stable_partition(mine, [&](const host::PresetRef& r) { return r.param_id == options.recipe->param_id; });
+        std::optional<host::PresetRef> first_ok;  // the ref the recipe names
         rep.offered = static_cast<int>(mine.size());
         int empty_run = 0;
         for (const auto& ref : mine) {
@@ -228,9 +229,10 @@ expected<HarvestResult, std::string> harvest(host::Instance& inst, const Harvest
                 host::Job js = plan;
                 js.coords.clear();
                 js.state = cap->state;
-                const Rendered r1 = e.state_hash == default_hash ? Rendered{} : render(js);
-                e.difference = r1.ok ? difference(r1, def) : 0.0;
                 auto dup = std::ranges::find_if(ok_index, [&](std::size_t i) { return result.entries[i].state_hash == e.state_hash; });
+                // A state equal to the defaults or to an earlier preset needs no render.
+                const Rendered r1 = e.state_hash == default_hash || dup != ok_index.end() ? Rendered{} : render(js);
+                e.difference = r1.ok ? difference(r1, def) : 0.0;
                 if (e.state_hash == default_hash) {
                     e.outcome = PresetOutcome::NoChange;
                     e.message = "the state equals the defaults";
@@ -277,6 +279,7 @@ expected<HarvestResult, std::string> harvest(host::Instance& inst, const Harvest
                 if (e.name.empty()) e.name = std::format("{}-{:03}", to_string(method), e.number);
                 ok_index.push_back(result.entries.size());
                 ++rep.ok;
+                if (!first_ok) first_ok = ref;
             }
             const bool empty = e.outcome == PresetOutcome::NoChange || e.outcome == PresetOutcome::LoadError ||
                                e.outcome == PresetOutcome::Timeout;
@@ -299,10 +302,8 @@ expected<HarvestResult, std::string> harvest(host::Instance& inst, const Harvest
             recipe.count = rep.offered;
             recipe.found = rep.ok;
             recipe.wait_ms = options.wait_ms;
-            if (!mine.empty()) {
-                recipe.param_id = mine.front().param_id;
-                recipe.list_id = mine.front().list_id;
-            }
+            recipe.param_id = first_ok->param_id;
+            recipe.list_id = first_ok->list_id;
             result.recipe = recipe;
         }
         if (rep.ok > 0 && !options.all_methods && !options.method) break;  // each step runs until it yields presets
@@ -380,6 +381,7 @@ expected<fs::path, std::string> write_library(const fs::path& root, const Harves
     index.set("format", std::string(host::to_string(info.format))).set("plugin", info.name).set("vendor", info.vendor)
         .set("uid", info.uid).set("version_hash", info.version_hash).set("floor", result.floor).set("threshold", result.threshold)
         .set("methods", std::move(methods)).set("presets", std::move(presets));
+    if (!result.listing_error.empty()) index.set("listing_error", result.listing_error);
     if (result.recipe) index.set("recipe", result.recipe->to_json());
     if (auto w = output::write_text(dir / "index.json", index.dump(2) + "\n"); !w) return unexpected(w.error());
     if (auto w = output::write_text(dir / "harvest-report.csv", report); !w) return unexpected(w.error());

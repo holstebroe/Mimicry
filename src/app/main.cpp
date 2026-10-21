@@ -333,11 +333,6 @@ int cmd_fingerprint(const Args& a) {
     return 0;
 }
 
-void write_text(const fs::path& path, const std::string& text) {
-    std::ofstream f(path, std::ios::binary);
-    f << text;
-}
-
 int cmd_fit(const Args& a) {
     const std::string plugin_path = a.get("--plugin"), wav_path = a.get("--wav");
     if (plugin_path.empty() || wav_path.empty()) return fail("fit", "usage: mimicry fit --plugin P --wav T.wav");
@@ -491,7 +486,8 @@ int cmd_fit(const Args& a) {
             losses[std::string(features::to_string(features::Feature(f)))] = c.eval.score.loss[f];
         pj.set("features", json::Value(std::move(losses)));
         pj.set("notes", host::to_json(job)["notes"]);
-        write_text(fs::path(stem.string() + ".params.json"), pj.dump(2) + "\n");
+        if (auto w = output::write_text(fs::path(stem.string() + ".params.json"), pj.dump(2) + "\n"); !w)
+            std::fputs(("mimicry fit: " + w.error() + "\n").c_str(), stderr);
         if (auto audio = obj.render(c.coords)) {
             WavData w{audio->sample_rate, audio->channels, audio->samples};
             (void)write_wav(fs::path(stem.string() + ".wav"), w);
@@ -596,7 +592,7 @@ int cmd_fit(const Args& a) {
     json::Array topk;
     for (const auto& t : res.top_k) topk.push_back(t.eval.loss);
     result.set("top_k_loss_db", json::Value(std::move(topk)));
-    write_text(dir / "result.json", result.dump(2) + "\n");
+    if (auto w = output::write_text(dir / "result.json", result.dump(2) + "\n"); !w) return fail("fit", w.error());
 
     std::string summary = std::format("\nbest {:.3f} dB (gain {:+.1f} dB) after {} evaluations in {:.0f} s\n", res.best.eval.loss,
                                       res.best.eval.score.gain_db, res.evals, res.seconds);
@@ -673,6 +669,7 @@ int cmd_harvest(const Args& a) {
     if (!dir) return fail("harvest", dir.error());
 
     std::string out;
+    if (!res->listing_error.empty()) out += "the plugin's preset listing failed: " + res->listing_error + "\n";
     for (const auto& m : res->methods)
         out += std::format("{}: {} offered, {} tried, {} ok{}\n", host::to_string(m.method), m.offered, m.tried, m.ok,
                            m.note.empty() ? "" : "; " + m.note);

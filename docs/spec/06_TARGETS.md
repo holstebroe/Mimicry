@@ -169,9 +169,13 @@ Order of checks: state equals the defaults → `no-change`; same state hash as a
 like an earlier preset → `duplicate`; a second render differs → `not-reproducible`; else `ok`, with a
 `params_reproduce` flag saying whether a render from the parameter snapshot alone matches (it does not for
 plugins with hidden state). Duplicates are checked across methods, so `--all-methods` collects each sound
-once. A method is abandoned when its first 3 presets are all `no-change` or failed [D]; the blind methods
-(MIDI program change, VST3 program lists and program data, whose slots may be empty) stop after 8 empty
-slots in a row [D] ("end of the bank"). `--method` forces one method, `--all-methods` runs every method,
+once. A method is abandoned when its first 3 presets are all `no-change` or failed [D]; MIDI program change,
+which cannot say how many programs exist, stops after 8 empty slots in a row [D] ("end of the bank"),
+while VST3 program lists and program data report their program count and are tried slot by slot to the
+end, empty slots included [A]. A state equal to the defaults or to an earlier `ok` preset is classified
+without a render. The defaults must render twice; a failed second render fails the harvest rather than
+setting a meaningless floor [A]. A failed preset listing (CLAP discovery, VST3 program lists) is reported
+on the console and as `listing_error` in `index.json`; file presets are still tried [A]. `--method` forces one method, `--all-methods` runs every method,
 `--max N` stops after N presets, `--wait-ms` sets the wait after each load (200 ms [D]). Files: `--from`
 files are tried whatever their extension; in `--from` folders `.state` (and `.vstpreset` for VST3), or
 every file with `--raw-files`; for VST3 also the standard folders (`~/.vst3/presets`, `/usr/share/vst3/presets`,
@@ -209,7 +213,7 @@ click and its wait time are stored in the recipe.
 **Recipe**: the method that worked, with its details (program-change parameter id and count, MIDI bank
 layout, wait times), is stored in the plugin profile (01 §7), so the next harvest of the same plugin
 goes straight to it, a taught click included. Recipes are plain JSON and can be shared. Implemented [A]
-(WP5.10): `harvest_recipe` in the profile (method, program parameter or list id, presets offered and
+(WP5.10): `harvest_recipe` in the profile (method, the program parameter or list id of its first ok preset, presets offered and
 found, wait time), written by the first method that yields presets and kept by `probe` and `fit`; the
 next harvest tries that method first (that parameter or list first) and stops there if it yields
 presets; `--no-recipe` ignores it.

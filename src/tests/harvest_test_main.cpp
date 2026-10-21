@@ -118,10 +118,11 @@ int main(int argc, char** argv) {
         check(r.has_value(), std::string(to_string(m)) + ": harvest runs: " + (r ? std::string() : r.error()));
         if (!r) continue;
         check_bank(*r, std::string(to_string(m)), m == PresetMethod::ClapPreset);
-        if (m != PresetMethod::ClapPreset) {
-            const auto& rep = r->methods.front();
+        const auto& rep = r->methods.front();
+        if (m == PresetMethod::MidiProgram)
             check(rep.tried < rep.offered && !rep.note.empty(), std::string(to_string(m)) + ": a blind method stops at the end of the bank");
-        }
+        else if (m == PresetMethod::ProgramList)
+            check(rep.tried == rep.offered, std::string(to_string(m)) + ": a counted program list is tried to its last slot");
         if (!first) first = std::move(*r);
     }
 

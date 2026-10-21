@@ -199,8 +199,10 @@ Implemented [A] (WP5.8a), in the shared render core for both formats:
   program-change parameter that no program list drives (the heuristic step), for both formats alike.
 - `apply_preset(ref, wait_ms)` resets and reloads the clean snapshot first, so no preset inherits the
   previous one. File, CLAP preset and program-data loads are main-thread calls; the core then pumps until
-  `loaded` / `on_error`, at most `10 × wait_ms` [D] (a plugin need not call `loaded`), and processes
-  `wait_ms` of silence. Program lists and program parameters send the program-change parameter (the one
+  `loaded` / `on_error`, at most `10 × wait_ms` [D] (a plugin need not call `loaded`; once a load ends
+  unreported, later loads wait at most `wait_ms` until the plugin reports again [D]), and processes
+  `wait_ms` of silence. Each load starts with a clean load status, and a `loaded` / `on_error` whose
+  location and load key are not the load in flight is ignored [A]. Program lists and program parameters send the program-change parameter (the one
   place it is sent, 05 §9) in block 0 of `wait_ms` of silence; MIDI program change goes in block 0 as
   `Block::program` (bank select CC 0 / CC 32 before it when a bank is given). The capture is
   `save_state()`, then `load_state()` of that blob (it must load on its own, and a separate VST3
