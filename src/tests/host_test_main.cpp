@@ -149,7 +149,7 @@ void test_rendering(Instance& inst) {
     auto odd = make_job(inst);
     odd.coords[index_of(inst, ts::kCutoff)] = std::numeric_limits<double>::infinity();
     auto wire = json::parse(to_json(odd).dump());
-    auto decoded = wire ? job_from_json(*wire) : unexpected(std::string("parse"));
+    auto decoded = wire ? job_from_json(*wire) : mimicry::unexpected(std::string("parse"));
     check(decoded && std::isnan(decoded->coords[index_of(inst, ts::kCutoff)]), "codec: a non-finite coordinate reads back as NaN");
 
     // +100 cents is one semitone up (note expression / tuning).
