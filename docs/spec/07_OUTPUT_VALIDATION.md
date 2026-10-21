@@ -69,7 +69,7 @@ All tests are executables run by `ctest`; DSP-style tests return non-zero on fai
 | T14 | `.vstpreset` round trip: write, load back through the VST3 backend, render, equal to the original render; SDK validator passes on `mimicry_test_synth_vst3` |
 | T15 | **Cross-format transfer**: Acidus as CLAP source, `acidus_vst3` as target (the same engine through the wrapper): the optimizer recovers the source parameters within tolerance, and the reverse |
 | T16 | VST3 hosting specifics: restart request handling, program-change pinning, offline mode set, tuning cents honoured on `NoteOnEvent` (run for both formats in `host_*`; table changes after a restart in `worker_*`) |
-| T17 | **Harvest**: the test synth's factory presets found and loaded through CLAP preset discovery, VST3 program data, the VST3 program list and MIDI program change; every preset `ok`, the planted duplicate and the planted no-op preset reported as such; the recipe is stored and reused; source renders from the captured state equal renders from the preset's parameters |
+| T17 | **Harvest**: the test synth's factory presets found and loaded through CLAP preset discovery, VST3 program data, the VST3 program list and MIDI program change; every preset `ok`, the planted duplicate and the planted no-op preset reported as such; the recipe is stored and reused; source renders from the captured state equal renders from the preset's parameters. Implemented in `host_*` (every method in-process, file location, state files, preset-load errors) and `harvest_clap`/`harvest_vst3` (through a worker: per method, ladder stop, recipe first, library files and report, library states reloaded as file presets, state render through shared memory, `mimicry harvest` twice with the recipe); VST3 program data has no fixture (clap-wrapper lacks it) |
 | T18 | **Effects**: `mimicry_test_fx` (CLAP and VST3) renders the probe signals with input and latency compensation in both formats; reamp fit and effect-to-effect transfer recover random presets within 1.5x the floor; effect features pass their T4 cases |
 | T19 | **Map**: test synth CLAP → test synth VST3 maps every parameter to itself with full confidence; against a renamed and re-tapered variant, roles and laws are recovered within tolerance |
 | T20 | **Doctor**: report written for the test synth and the test effect in both formats, `report.json` numbers equal the probe's, the planted hazards appear in the health section; the frequency response of the test effect's filter matches its analytic response within 0.5 dB |
@@ -96,7 +96,16 @@ defaults with a one-pole after every activation, for the settle-time probe (05 �
 out of the table, 02 §4) and its MIDI program-change parameter (pinned, never sent).
 
 For T17 it exposes a small factory bank (CLAP preset discovery, VST3 program list with program data,
-MIDI program change), including one duplicate and one preset that changes nothing. **`mimicry_test_fx`**
+MIDI program change), including one duplicate and one preset that changes nothing. Implemented [A]: six
+presets (*Init* = the defaults, the no-op; *Soft Pad*, *Lead*, *Pluck*, *Lead Copy* = *Lead*, the duplicate;
+*Vibrato*), each replacing every value. CLAP: a preset-discovery provider with the bank as a plugin
+location (load key = index) and, when `MIMICRY_TEST_PRESET_DIR` is set, that folder as a file location of
+`.mtspreset` state files; `preset-load` defers the load to `on_main_thread` and then calls the host's
+`loaded` (or `on_error` for an unknown key), so the host's wait is exercised; MIDI program change selects
+the bank. VST3: clap-wrapper turns its own 128-entry program list ("Program N") behind a program-change
+parameter into MIDI program change, so the VST3 build is harvested through the program list; clap-wrapper
+has no `IProgramListData`, so the program-data path has no fixture yet. The read-only *Meter* is saved at
+its default, so a state does not depend on the last block played. **`mimicry_test_fx`**
 [A] is its effect sibling for T18 and T20: a filter, a waveshaper, a compressor, a short delay with
 feedback and an LFO-modulated gain, built the same two ways, with reported latency.
 

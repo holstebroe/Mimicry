@@ -2,12 +2,15 @@
 // CLAP headers on the host side.
 
 #include <clap/clap.h>
+#include <clap/factory/preset-discovery.h>
+#include <clap/ext/preset-load.h>
 
 #include <algorithm>
 #include <atomic>
 #include <cmath>
 #include <cstring>
 #include <deque>
+#include <filesystem>
 #include <format>
 #include <mutex>
 #include <thread>
@@ -93,6 +96,9 @@ public:
         latency_ = static_cast<const clap_plugin_latency_t*>(plugin_->get_extension(plugin_, CLAP_EXT_LATENCY));
         audio_ports_ = static_cast<const clap_plugin_audio_ports_t*>(plugin_->get_extension(plugin_, CLAP_EXT_AUDIO_PORTS));
         note_ports_ = static_cast<const clap_plugin_note_ports_t*>(plugin_->get_extension(plugin_, CLAP_EXT_NOTE_PORTS));
+        preset_load_ = static_cast<const clap_plugin_preset_load_t*>(plugin_->get_extension(plugin_, CLAP_EXT_PRESET_LOAD));
+        if (!preset_load_)
+            preset_load_ = static_cast<const clap_plugin_preset_load_t*>(plugin_->get_extension(plugin_, CLAP_EXT_PRESET_LOAD_COMPAT));
         // Offline rendering, as the VST3 backend's kOffline (spec 02 section 5): main thread, before activation.
         if (const auto* render = static_cast<const clap_plugin_render_t*>(plugin_->get_extension(plugin_, CLAP_EXT_RENDER));
             render && render->set && !(render->has_hard_realtime_requirement && render->has_hard_realtime_requirement(plugin_)))
@@ -227,6 +233,61 @@ public:
 
     bool take_restart_request() override { return restart_.exchange(false); }
 
+    // --- presets (docs/spec/02_HOSTING.md section 7) ---
+
+    std::vector<PresetRef> presets() override {
+        std::vector<PresetRef> out = discover_presets();
+        if (midi_dialect_)  // blind: the plugin cannot say which programs exist; the harvest verifies each
+            for (int i = 0; i < 128; ++i) {
+                PresetRef r;
+                r.method = PresetMethod::MidiProgram;
+                r.index = i;
+                r.count = 128;
+                out.push_back(std::move(r));
+            }
+        return out;
+    }
+
+    expected<void, HostError> load_preset(const PresetRef& ref) override {
+        {  // every load starts clean: an earlier load's error, pending flag or late callback never carries over
+            std::lock_guard lock(preset_mutex_);
+            preset_pending_ = false;
+            preset_error_.clear();
+            preset_location_.clear();
+            preset_key_.clear();
+        }
+        if (ref.method != PresetMethod::ClapPreset) return Engine::load_preset(ref);
+        if (!preset_load_ || !preset_load_->from_location) return unexpected(HostError{"the plugin has no preset-load extension"});
+        {
+            std::lock_guard lock(preset_mutex_);
+            preset_pending_ = true;
+            preset_location_ = ref.location_is_file ? ref.location : std::string();
+            preset_key_ = ref.load_key;
+        }
+        const uint32_t kind = ref.location_is_file ? CLAP_PRESET_DISCOVERY_LOCATION_FILE : CLAP_PRESET_DISCOVERY_LOCATION_PLUGIN;
+        if (!preset_load_->from_location(plugin_, kind, ref.location_is_file ? ref.location.c_str() : nullptr,
+                                         ref.load_key.empty() ? nullptr : ref.load_key.c_str())) {
+            std::lock_guard lock(preset_mutex_);
+            preset_pending_ = false;
+            return unexpected(HostError{preset_error_.empty() ? std::string("preset-load.from_location failed") : preset_error_});
+        }
+        return {};
+    }
+
+    PresetLoadStatus preset_status() override {
+        std::lock_guard lock(preset_mutex_);
+        return {preset_pending_, preset_error_};
+    }
+
+    std::optional<double> param_coord(std::uint32_t id) const override {
+        const auto it = index_.find(id);
+        double plain = 0;
+        if (it == index_.end() || !params_ || !params_->get_value(plugin_, id, &plain)) return std::nullopt;
+        return plain_to_coord(params_list_[it->second], plain);
+    }
+
+    bool midi_program_change() const override { return midi_dialect_; }
+
     void pump_main_thread() override {
         if (callback_.exchange(false) && plugin_) plugin_->on_main_thread(plugin_);
     }
@@ -258,6 +319,22 @@ public:
             e.param.key = -1;
             e.param.value = coord_to_plain(params_list_[it->second], pv.coord);
             events_.push_back(e);
+        }
+        if (block.program >= 0 && midi_dialect_) {  // bank select (CC 0 / CC 32), then the program change
+            auto midi = [&](uint8_t a, uint8_t b, uint8_t c) {
+                Event m{};
+                m.midi.header = {sizeof(clap_event_midi_t), 0, CLAP_CORE_EVENT_SPACE_ID, CLAP_EVENT_MIDI, 0};
+                m.midi.port_index = 0;
+                m.midi.data[0] = a;
+                m.midi.data[1] = b;
+                m.midi.data[2] = c;
+                events_.push_back(m);
+            };
+            if (block.bank >= 0) {
+                midi(0xB0, 0, static_cast<uint8_t>((block.bank >> 7) & 0x7F));
+                midi(0xB0, 32, static_cast<uint8_t>(block.bank & 0x7F));
+            }
+            midi(0xC0, static_cast<uint8_t>(block.program & 0x7F), 0);
         }
         for (const NoteEvent& n : block.notes) {
             if (n.set_bend && midi_dialect_) {  // MIDI pitch bend, channel 0, ahead of the note
@@ -399,6 +476,132 @@ private:
         }
     }
 
+    // CLAP preset discovery (factory/preset-discovery.h): every provider of the entry, its declared plugin
+    // locations and the files of its file locations with the declared extensions, kept when the preset names
+    // this plugin (or names none).
+    std::vector<PresetRef> discover_presets() {
+        std::vector<PresetRef> out;
+        if (!entry_) return out;
+        const auto* factory = static_cast<const clap_preset_discovery_factory_t*>(entry_->get_factory(CLAP_PRESET_DISCOVERY_FACTORY_ID));
+        if (!factory)
+            factory = static_cast<const clap_preset_discovery_factory_t*>(entry_->get_factory(CLAP_PRESET_DISCOVERY_FACTORY_ID_COMPAT));
+        if (!factory) return out;
+
+        struct Location {
+            uint32_t kind;
+            std::string path;
+        };
+        struct Indexer {
+            std::vector<std::string> extensions;
+            std::vector<Location> locations;
+        };
+        struct Receiver {
+            std::vector<PresetRef>* out;
+            const std::string* plugin_id;
+            PresetRef base;
+            std::vector<int> mentions;  // per preset: -1 none named, 0 others only, 1 this plugin
+        };
+        for (uint32_t pi = 0; pi < factory->count(factory); ++pi) {
+            const auto* desc = factory->get_descriptor(factory, pi);
+            if (!desc || !desc->id) continue;
+            Indexer ix;
+            clap_preset_discovery_indexer_t indexer{};
+            indexer.clap_version = CLAP_VERSION;
+            indexer.name = "Mimicry";
+            indexer.vendor = "Mimicry";
+            indexer.url = "";
+            indexer.version = MIMICRY_VERSION;
+            indexer.indexer_data = &ix;
+            indexer.declare_filetype = [](const clap_preset_discovery_indexer_t* i, const clap_preset_discovery_filetype_t* ft) {
+                if (ft && ft->file_extension) static_cast<Indexer*>(i->indexer_data)->extensions.emplace_back(ft->file_extension);
+                return true;
+            };
+            indexer.declare_location = [](const clap_preset_discovery_indexer_t* i, const clap_preset_discovery_location_t* loc) {
+                if (loc) static_cast<Indexer*>(i->indexer_data)->locations.push_back({loc->kind, loc->location ? loc->location : ""});
+                return true;
+            };
+            indexer.declare_soundpack = [](const clap_preset_discovery_indexer_t*, const clap_preset_discovery_soundpack_t*) { return true; };
+            indexer.get_extension = [](const clap_preset_discovery_indexer_t*, const char*) -> const void* { return nullptr; };
+            const auto* provider = factory->create(factory, &indexer, desc->id);
+            if (!provider) continue;
+            if (!provider->init(provider)) {
+                provider->destroy(provider);
+                continue;
+            }
+
+            Receiver rc{&out, &info_.uid, {}, {}};
+            clap_preset_discovery_metadata_receiver_t receiver{};
+            receiver.receiver_data = &rc;
+            receiver.on_error = [](const clap_preset_discovery_metadata_receiver_t*, int32_t, const char*) {};
+            receiver.begin_preset = [](const clap_preset_discovery_metadata_receiver_t* r, const char* name, const char* key) {
+                auto* c = static_cast<Receiver*>(r->receiver_data);
+                PresetRef ref = c->base;
+                ref.name = name ? name : "";
+                ref.load_key = key ? key : "";
+                c->out->push_back(std::move(ref));
+                c->mentions.push_back(-1);
+                return true;
+            };
+            receiver.add_plugin_id = [](const clap_preset_discovery_metadata_receiver_t* r, const clap_universal_plugin_id_t* id) {
+                auto* c = static_cast<Receiver*>(r->receiver_data);
+                if (c->mentions.empty() || !id || !id->abi || !id->id) return;
+                const bool ours = !std::strcmp(id->abi, "clap") && *c->plugin_id == id->id;
+                c->mentions.back() = std::max(c->mentions.back(), ours ? 1 : 0);
+            };
+            receiver.set_soundpack_id = [](const clap_preset_discovery_metadata_receiver_t*, const char*) {};
+            receiver.set_flags = [](const clap_preset_discovery_metadata_receiver_t*, uint32_t) {};
+            receiver.add_creator = [](const clap_preset_discovery_metadata_receiver_t*, const char*) {};
+            receiver.set_description = [](const clap_preset_discovery_metadata_receiver_t*, const char*) {};
+            receiver.set_timestamps = [](const clap_preset_discovery_metadata_receiver_t*, clap_timestamp, clap_timestamp) {};
+            receiver.add_feature = [](const clap_preset_discovery_metadata_receiver_t*, const char*) {};
+            receiver.add_extra_info = [](const clap_preset_discovery_metadata_receiver_t*, const char*, const char*) {};
+
+            const std::size_t first = out.size();
+            for (const Location& loc : ix.locations) {
+                if (loc.kind == CLAP_PRESET_DISCOVERY_LOCATION_PLUGIN) {
+                    rc.base = PresetRef{};
+                    rc.base.method = PresetMethod::ClapPreset;
+                    provider->get_metadata(provider, CLAP_PRESET_DISCOVERY_LOCATION_PLUGIN, nullptr, &receiver);
+                    continue;
+                }
+                // A file location is a file or a folder to crawl (only the declared extensions, if any).
+                std::error_code ec;
+                std::vector<std::filesystem::path> files;
+                if (std::filesystem::is_regular_file(loc.path, ec)) {
+                    files.emplace_back(loc.path);
+                } else if (std::filesystem::is_directory(loc.path, ec)) {
+                    for (auto it = std::filesystem::recursive_directory_iterator(loc.path, ec);
+                         !ec && it != std::filesystem::recursive_directory_iterator(); it.increment(ec)) {
+                        if (!it->is_regular_file(ec)) continue;
+                        const std::string ext = it->path().extension().string();
+                        const bool wanted = ix.extensions.empty() || std::ranges::any_of(ix.extensions, [&](const std::string& e) {
+                            return ext == "." + e || ext == e;
+                        });
+                        if (wanted) files.push_back(it->path());
+                    }
+                    std::ranges::sort(files);
+                }
+                for (const auto& f : files) {
+                    rc.base = PresetRef{};
+                    rc.base.method = PresetMethod::ClapPreset;
+                    rc.base.location = f.string();
+                    rc.base.location_is_file = true;
+                    const std::size_t before = out.size();
+                    provider->get_metadata(provider, CLAP_PRESET_DISCOVERY_LOCATION_FILE, rc.base.location.c_str(), &receiver);
+                    for (std::size_t k = before; k < out.size(); ++k)
+                        if (out[k].name.empty()) out[k].name = f.stem().string();
+                }
+            }
+            provider->destroy(provider);
+            // Presets that name only other plugins are not this plugin's.
+            std::vector<PresetRef> kept(out.begin(), out.begin() + static_cast<std::ptrdiff_t>(first));
+            for (std::size_t k = first; k < out.size(); ++k)
+                if (rc.mentions[k - first] != 0) kept.push_back(std::move(out[k]));
+            out = std::move(kept);
+        }
+        return out;
+    }
+
     // --- host callbacks ---
     static ClapEngine* self(const clap_host_t* h) { return static_cast<ClapEngine*>(h->host_data); }
     static void host_request_restart(const clap_host_t* h) { self(h)->restart_ = true; }
@@ -416,6 +619,24 @@ private:
     static void params_clear(const clap_host_t*, clap_id, clap_param_clear_flags) {}
     static void params_request_flush(const clap_host_t*) {}
     static void state_mark_dirty(const clap_host_t*) {}
+    // A callback counts only for the load in flight: one arriving late for an earlier preset is ignored.
+    bool current_preset(const char* location, const char* key) const {
+        if (!preset_pending_ || preset_key_ != (key ? key : "")) return false;
+        return preset_location_.empty() || preset_location_ == (location ? location : "");
+    }
+    static void preset_on_error(const clap_host_t* h, uint32_t, const char* location, const char* key, int32_t, const char* msg) {
+        auto* e = self(h);
+        std::lock_guard lock(e->preset_mutex_);
+        if (!e->current_preset(location, key)) return;
+        e->preset_pending_ = false;
+        e->preset_error_ = msg && *msg ? msg : "unknown error";
+    }
+    static void preset_loaded(const clap_host_t* h, uint32_t, const char* location, const char* key) {
+        auto* e = self(h);
+        std::lock_guard lock(e->preset_mutex_);
+        if (!e->current_preset(location, key)) return;
+        e->preset_pending_ = false;
+    }
     static void latency_changed(const clap_host_t*) {}
     static void tail_changed(const clap_host_t*) {}
     static void log_msg(const clap_host_t* h, clap_log_severity, const char* msg) {
@@ -432,12 +653,14 @@ private:
         static const clap_host_latency_t latency{latency_changed};
         static const clap_host_tail_t tail{tail_changed};
         static const clap_host_log_t log{log_msg};
+        static const clap_host_preset_load_t preset_load{preset_on_error, preset_loaded};
         if (!std::strcmp(id, CLAP_EXT_THREAD_CHECK)) return &thread_check;
         if (!std::strcmp(id, CLAP_EXT_PARAMS)) return &params;
         if (!std::strcmp(id, CLAP_EXT_STATE)) return &state;
         if (!std::strcmp(id, CLAP_EXT_LATENCY)) return &latency;
         if (!std::strcmp(id, CLAP_EXT_TAIL)) return &tail;
         if (!std::strcmp(id, CLAP_EXT_LOG)) return &log;
+        if (!std::strcmp(id, CLAP_EXT_PRESET_LOAD) || !std::strcmp(id, CLAP_EXT_PRESET_LOAD_COMPAT)) return &preset_load;
         return nullptr;
     }
 
@@ -452,6 +675,7 @@ private:
     const clap_plugin_latency_t* latency_ = nullptr;
     const clap_plugin_audio_ports_t* audio_ports_ = nullptr;
     const clap_plugin_note_ports_t* note_ports_ = nullptr;
+    const clap_plugin_preset_load_t* preset_load_ = nullptr;
 
     PluginInfo info_;
     std::vector<ParamDesc> params_list_;
@@ -471,6 +695,10 @@ private:
     std::vector<Event> events_;
 
     std::atomic<bool> restart_{false}, callback_{false}, rescan_pending_{false};
+    std::mutex preset_mutex_;
+    bool preset_pending_ = false;
+    std::string preset_error_;
+    std::string preset_location_, preset_key_;  // the load in flight
     std::mutex log_mutex_;
     std::deque<std::string> log_;
 };

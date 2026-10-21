@@ -20,6 +20,9 @@
 //   bend_range                 pitch-bend range in semitones (default 2). Hidden
 //   require_offline >= 0.5     output turns NaN unless the host set offline rendering (CLAP render extension,
 //                              VST3 kOffline through clap-wrapper): T16 "offline mode set". Hidden
+//   factory bank               six presets (load_factory) for the harvest test T17: CLAP preset discovery +
+//                              preset-load, MIDI program change (the VST3 build's program list). "Init" is the
+//                              defaults (the planted no-op), "Lead Copy" equals "Lead" (the planted duplicate)
 //   smoothing  (ms)            one-pole glide of Level and Cutoff from their defaults after (re)activation,
 //                              like a parameter smoother; 0 = none (default). The settle-time probe (spec 05
 //                              section 6) must measure it. Hidden
@@ -118,6 +121,26 @@ inline constexpr ParamInfo kParams[kParamCount] = {
 
 inline constexpr const char* kRenamedHidden = "Hidden Drive (renamed)";
 
+// The factory bank (spec 07 section 5): values over the defaults. Parameters not named keep their default.
+struct FactoryValue {
+    ParamId id;
+    double value;
+};
+struct FactoryPreset {
+    const char* name;
+    FactoryValue values[8];
+    int count;
+};
+inline constexpr FactoryPreset kFactoryBank[] = {
+    {"Init", {}, 0},
+    {"Soft Pad", {{kCutoff, 1200}, {kAttack, 400}, {kDecay, 600}, {kSustain, 80}, {kRelease, 1200}, {kLevel, -10}}, 6},
+    {"Lead", {{kWave, 1}, {kCutoff, 6000}, {kAttack, 2}, {kDecay, 150}, {kSustain, 60}, {kRelease, 200}, {kDetune, 7}}, 7},
+    {"Pluck", {{kWave, 1}, {kCutoff, 2500}, {kAttack, 1}, {kDecay, 120}, {kSustain, 0}, {kRelease, 100}, {kLevel, -6}}, 7},
+    {"Lead Copy", {{kWave, 1}, {kCutoff, 6000}, {kAttack, 2}, {kDecay, 150}, {kSustain, 60}, {kRelease, 200}, {kDetune, 7}}, 7},
+    {"Vibrato", {{kCutoff, 9000}, {kAttack, 20}, {kLfoRate, 6}, {kLfoDepth, 30}}, 4},
+};
+inline constexpr int kFactoryCount = static_cast<int>(sizeof kFactoryBank / sizeof kFactoryBank[0]);
+
 // Programs overwrite the wave and cutoff parameters (the reason hosts pin the program parameter).
 struct Program {
     double wave, cutoff;
@@ -172,6 +195,16 @@ public:
             renamed_ = plain >= 0.5;
             if (on_rename) on_rename();
         }
+    }
+
+    // A factory preset replaces every value (as a real preset does); out-of-range indices are ignored.
+    bool load_factory(int index) {
+        if (index < 0 || index >= kFactoryCount) return false;
+        for (std::uint32_t i = 0; i < kParamCount; ++i)
+            if (!kParams[i].readonly && i != kHazRename) values_[i] = kParams[i].def;
+        const auto& f = kFactoryBank[index];
+        for (int k = 0; k < f.count; ++k) values_[f.values[k].id] = f.values[k].value;
+        return true;
     }
 
     // Display name of a parameter: kHidden changes name with kHazRename.

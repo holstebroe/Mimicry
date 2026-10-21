@@ -57,6 +57,9 @@ public:
     [[nodiscard]] expected<std::vector<std::uint8_t>, host::HostError> save_state() override;
     [[nodiscard]] expected<void, host::HostError> load_state(const std::vector<std::uint8_t>& blob) override;
     [[nodiscard]] expected<void, host::HostError> reset() override;
+    [[nodiscard]] expected<std::vector<host::PresetRef>, host::HostError> presets() override;
+    // A crash or hang while loading costs the worker (restarted on the next call); the error says which.
+    [[nodiscard]] expected<host::CapturedPreset, host::HostError> apply_preset(const host::PresetRef& ref, double wait_ms = 200) override;
 
     [[nodiscard]] const WorkerStats& stats() const { return stats_; }
     // Non-empty once the plugin's parameter table differs from the one it had when first opened (a restart

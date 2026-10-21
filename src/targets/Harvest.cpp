@@ -1,0 +1,391 @@
+#include "targets/Harvest.hpp"
+
+#include <algorithm>
+#include <cctype>
+#include <cmath>
+#include <cstdlib>
+#include <format>
+#include <fstream>
+#include <sstream>
+
+#include "host/Codec.hpp"
+#include "opt/Embedding.hpp"
+#include "opt/Objective.hpp"
+
+namespace mimicry::targets {
+
+namespace fs = std::filesystem;
+using host::PresetMethod;
+
+std::string_view to_string(PresetOutcome o) noexcept {
+    switch (o) {
+        case PresetOutcome::Ok: return "ok";
+        case PresetOutcome::NoChange: return "no-change";
+        case PresetOutcome::Duplicate: return "duplicate";
+        case PresetOutcome::NotReproducible: return "not-reproducible";
+        case PresetOutcome::LoadError: return "load-error";
+        case PresetOutcome::Timeout: return "timeout";
+    }
+    return "unknown";
+}
+
+int HarvestResult::ok_count() const {
+    return static_cast<int>(std::ranges::count_if(entries, [](const HarvestEntry& e) { return e.outcome == PresetOutcome::Ok; }));
+}
+
+int ladder_rank(PresetMethod m) noexcept {
+    switch (m) {
+        case PresetMethod::File: return 0;
+        case PresetMethod::ClapPreset: return 1;
+        case PresetMethod::ProgramData: return 2;
+        case PresetMethod::ProgramList: return 3;
+        case PresetMethod::MidiProgram: return 4;
+        case PresetMethod::ProgramParam: return 5;
+    }
+    return 6;
+}
+
+std::string state_hash(const std::vector<std::uint8_t>& state) {
+    std::uint64_t h = 1469598103934665603ull;
+    for (const std::uint8_t b : state) {
+        h ^= b;
+        h *= 1099511628211ull;
+    }
+    return std::format("{:016x}-{}", h, state.size());
+}
+
+namespace {
+
+std::string lower(std::string s) {
+    std::ranges::transform(s, s.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    return s;
+}
+
+// Methods that cannot say how many slots exist: a run of empty slots ends the bank. Program lists and
+// program data report their program count, so every slot is tried.
+bool blind(PresetMethod m) { return m == PresetMethod::MidiProgram; }
+
+// The standard VST3 preset folders of a plugin [S: VST3 SDK, "Preset Locations"]: user, then shared.
+std::vector<fs::path> vst3_preset_folders(const host::PluginInfo& info) {
+    std::vector<fs::path> roots;
+    auto env = [](const char* name) -> std::string {
+        const char* v = std::getenv(name);
+        return v ? v : "";
+    };
+#if defined(_WIN32)
+    if (!env("USERPROFILE").empty()) roots.push_back(fs::path(env("USERPROFILE")) / "Documents" / "VST3 Presets");
+    if (!env("APPDATA").empty()) roots.push_back(fs::path(env("APPDATA")) / "VST3 Presets");
+    if (!env("PROGRAMDATA").empty()) roots.push_back(fs::path(env("PROGRAMDATA")) / "VST3 Presets");
+#elif defined(__APPLE__)
+    if (!env("HOME").empty()) roots.push_back(fs::path(env("HOME")) / "Library" / "Audio" / "Presets");
+    roots.emplace_back("/Library/Audio/Presets");
+#else
+    if (!env("HOME").empty()) roots.push_back(fs::path(env("HOME")) / ".vst3" / "presets");
+    roots.emplace_back("/usr/share/vst3/presets");
+    roots.emplace_back("/usr/local/share/vst3/presets");
+#endif
+    std::vector<fs::path> out;
+    for (const auto& r : roots) out.push_back(r / info.vendor / info.name);
+    return out;
+}
+
+void add_folder(const fs::path& dir, bool any, const std::vector<std::string>& exts, std::vector<host::PresetRef>& out) {
+    std::error_code ec;
+    if (!fs::is_directory(dir, ec)) return;
+    std::vector<fs::path> files;
+    for (auto it = fs::recursive_directory_iterator(dir, ec); !ec && it != fs::recursive_directory_iterator(); it.increment(ec)) {
+        if (!it->is_regular_file(ec)) continue;
+        const std::string ext = lower(it->path().extension().string());
+        if (any || std::ranges::find(exts, ext) != exts.end()) files.push_back(it->path());
+    }
+    std::ranges::sort(files);
+    for (const auto& f : files) {
+        host::PresetRef r;
+        r.method = PresetMethod::File;
+        r.location = f.string();
+        r.name = f.stem().string();
+        out.push_back(std::move(r));
+    }
+}
+
+struct Rendered {
+    bool ok = false;
+    std::string why;
+    opt::Embedding emb;
+    double level = 0;
+};
+
+// Difference of two renders: the embedding distance (level free) or the level difference, whichever is
+// larger, so a preset that only changes the level still counts [D].
+double difference(const Rendered& a, const Rendered& b) {
+    if (!a.ok || !b.ok) return 1e9;
+    return std::max(opt::embedding_distance(a.emb, b.emb), std::fabs(a.level - b.level));
+}
+
+}  // namespace
+
+std::vector<host::PresetRef> file_presets(const HarvestOptions& options, const host::PluginInfo& info) {
+    std::vector<std::string> exts = {".state"};
+    if (info.format == host::PluginFormat::Vst3) exts.push_back(".vstpreset");
+    std::vector<host::PresetRef> out;
+    std::error_code ec;
+    for (const auto& p : options.from) {
+        if (fs::is_regular_file(p, ec)) {  // a file the user names is tried whatever its extension
+            host::PresetRef r;
+            r.method = PresetMethod::File;
+            r.location = p.string();
+            r.name = p.stem().string();
+            out.push_back(std::move(r));
+        } else {
+            add_folder(p, options.raw_files, exts, out);
+        }
+    }
+    if (options.standard_folders && info.format == host::PluginFormat::Vst3)
+        for (const auto& d : vst3_preset_folders(info)) add_folder(d, false, {".vstpreset"}, out);
+    return out;
+}
+
+expected<HarvestResult, std::string> harvest(host::Instance& inst, const HarvestOptions& options) {
+    const auto& params = inst.parameters();
+    HarvestResult result;
+
+    host::Job plan = options.plan;
+    plan.state.clear();
+    plan.coords.clear();
+    for (const auto& p : params) plan.coords.push_back(p.default_coord);
+    if (plan.notes.empty()) plan.notes.push_back({48, 0, 100.0f / 127.0f, 0, 600});
+    opt::Embedder embedder(plan.sample_rate);
+    auto render = [&](const host::Job& job) {
+        Rendered r;
+        auto audio = inst.render(job);
+        if (!audio) {
+            r.why = std::format("{}{}", to_string(audio.error()), inst.last_message().empty() ? "" : ": " + inst.last_message());
+            return r;
+        }
+        r.emb = embedder.embed(opt::mono_of(*audio));
+        r.level = r.emb.size() > opt::kEmbeddingLevel ? r.emb[opt::kEmbeddingLevel] : 0.0;
+        r.ok = true;
+        return r;
+    };
+
+    // The defaults: reference sound, floor, and the state a preset must differ from.
+    const Rendered def = render(plan), def2 = render(plan);
+    if (!def.ok) return unexpected("the defaults do not render (" + def.why + ")");
+    if (!def2.ok) return unexpected("the defaults render once but not twice (" + def2.why + ")");
+    result.floor = difference(def, def2);
+    result.threshold = std::max(2.0 * result.floor, 0.15);  // as the probe's "same sound" [D]
+    std::string default_hash;
+    if (auto st = inst.save_state()) default_hash = state_hash(*st);
+
+    // Candidates, grouped by method in ladder order (a recipe's method first).
+    std::vector<host::PresetRef> refs = file_presets(options, inst.info());
+    auto listed = inst.presets();
+    if (listed) refs.insert(refs.end(), listed->begin(), listed->end());
+    else result.listing_error = listed.error().message;  // reported, not dropped (rule 6)
+    std::vector<PresetMethod> order;
+    for (const auto& r : refs)
+        if (std::ranges::find(order, r.method) == order.end()) order.push_back(r.method);
+    std::ranges::stable_sort(order, [](PresetMethod a, PresetMethod b) { return ladder_rank(a) < ladder_rank(b); });
+    if (options.recipe && !options.method) {
+        const auto it = std::ranges::find(order, options.recipe->method);
+        if (it != order.end()) std::rotate(order.begin(), it, it + 1);
+    }
+    if (options.method && std::ranges::find(order, *options.method) == order.end())
+        return unexpected(std::format("the plugin offers no presets through '{}'{}", to_string(*options.method),
+                                      listed ? "" : " (listing failed: " + listed.error().message + ")"));
+
+    std::vector<std::size_t> ok_index;  // entries that are ok, with their renders
+    std::vector<Rendered> ok_render;
+    int ok_total = 0;
+    for (const PresetMethod method : order) {
+        if (options.method && method != *options.method) continue;
+        if (options.max_presets > 0 && ok_total >= options.max_presets) break;
+        const bool from_recipe = options.recipe && options.recipe->method == method;
+        MethodReport rep;
+        rep.method = method;
+        std::vector<host::PresetRef> mine;
+        for (const auto& r : refs)
+            if (r.method == method) mine.push_back(r);
+        // A recipe names the program parameter or list that worked: its presets first, the others after.
+        if (from_recipe && (method == PresetMethod::ProgramList || method == PresetMethod::ProgramParam))
+            std::ranges::stable_partition(mine, [&](const host::PresetRef& r) { return r.param_id == options.recipe->param_id; });
+        std::optional<host::PresetRef> first_ok;  // the ref the recipe names
+        rep.offered = static_cast<int>(mine.size());
+        int empty_run = 0;
+        for (const auto& ref : mine) {
+            if (options.max_presets > 0 && ok_total >= options.max_presets) {
+                rep.note = std::format("stopped at --max {}", options.max_presets);
+                break;
+            }
+            HarvestEntry e;
+            e.ref = ref;
+            ++rep.tried;
+            auto cap = inst.apply_preset(ref, options.wait_ms);
+            if (!cap) {
+                e.message = cap.error().message;
+                e.outcome = e.message.rfind("timeout", 0) == 0 ? PresetOutcome::Timeout : PresetOutcome::LoadError;
+            } else {
+                e.state_hash = state_hash(cap->state);
+                host::Job js = plan;
+                js.coords.clear();
+                js.state = cap->state;
+                auto dup = std::ranges::find_if(ok_index, [&](std::size_t i) { return result.entries[i].state_hash == e.state_hash; });
+                // A state equal to the defaults or to an earlier preset needs no render.
+                const Rendered r1 = e.state_hash == default_hash || dup != ok_index.end() ? Rendered{} : render(js);
+                e.difference = r1.ok ? difference(r1, def) : 0.0;
+                if (e.state_hash == default_hash) {
+                    e.outcome = PresetOutcome::NoChange;
+                    e.message = "the state equals the defaults";
+                } else if (dup != ok_index.end()) {
+                    e.outcome = PresetOutcome::Duplicate;
+                    e.duplicate_of = result.entries[*dup].number;
+                    e.message = "same state as an earlier preset";
+                } else if (!r1.ok) {
+                    e.outcome = PresetOutcome::LoadError;
+                    e.message = "the loaded state does not render: " + r1.why;
+                } else if (e.difference < result.threshold) {
+                    e.outcome = PresetOutcome::NoChange;
+                    e.message = std::format("sounds like the defaults ({:.3f} < {:.3f})", e.difference, result.threshold);
+                } else {
+                    for (std::size_t k = 0; k < ok_index.size(); ++k)
+                        if (difference(r1, ok_render[k]) < result.threshold) {
+                            e.outcome = PresetOutcome::Duplicate;
+                            e.duplicate_of = result.entries[ok_index[k]].number;
+                            e.message = "sounds like an earlier preset";
+                            break;
+                        }
+                    if (e.duplicate_of == 0) {
+                        // The blob alone reproduces the sound: a second render after its own reset and load.
+                        const Rendered r2 = render(js);
+                        const double rep_diff = difference(r1, r2);
+                        if (rep_diff > result.threshold) {
+                            e.outcome = PresetOutcome::NotReproducible;
+                            e.message = r2.ok ? std::format("two renders of the state differ by {:.3f}", rep_diff)
+                                              : "second render failed: " + r2.why;
+                        } else {
+                            e.outcome = PresetOutcome::Ok;
+                            host::Job jc = plan;
+                            jc.coords = cap->coords;
+                            e.params_reproduce = difference(render(jc), r1) < result.threshold;
+                            ok_render.push_back(r1);
+                        }
+                    }
+                }
+                e.name = !ref.name.empty() ? ref.name : cap->name;
+                if (e.outcome == PresetOutcome::Ok) e.captured = std::move(*cap);
+            }
+            if (e.outcome == PresetOutcome::Ok) {
+                e.number = ++ok_total;
+                if (e.name.empty()) e.name = std::format("{}-{:03}", to_string(method), e.number);
+                ok_index.push_back(result.entries.size());
+                ++rep.ok;
+                if (!first_ok) first_ok = ref;
+            }
+            const bool empty = e.outcome == PresetOutcome::NoChange || e.outcome == PresetOutcome::LoadError ||
+                               e.outcome == PresetOutcome::Timeout;
+            empty_run = empty ? empty_run + 1 : 0;
+            if (options.progress) options.progress(e);
+            result.entries.push_back(std::move(e));
+            if (rep.ok == 0 && rep.tried == options.abandon_after && empty_run == rep.tried) {
+                rep.note = std::format("abandoned: the first {} presets changed nothing or failed", rep.tried);
+                break;
+            }
+            if (blind(method) && empty_run >= options.stop_after) {
+                rep.note = std::format("end of the bank: {} empty slots in a row", empty_run);
+                break;
+            }
+        }
+        result.methods.push_back(rep);
+        if (rep.ok > 0 && !result.recipe) {
+            opt::HarvestRecipe recipe;
+            recipe.method = method;
+            recipe.count = rep.offered;
+            recipe.found = rep.ok;
+            recipe.wait_ms = options.wait_ms;
+            recipe.param_id = first_ok->param_id;
+            recipe.list_id = first_ok->list_id;
+            result.recipe = recipe;
+        }
+        if (rep.ok > 0 && !options.all_methods && !options.method) break;  // each step runs until it yields presets
+    }
+    return result;
+}
+
+namespace {
+
+std::string file_safe(const std::string& name) {
+    std::string out;
+    for (const char c : name) {
+        const auto u = static_cast<unsigned char>(c);
+        out += (std::isalnum(u) || c == '-' || c == '_' || c == '.' || c == ' ') ? c : '_';
+    }
+    while (!out.empty() && (out.back() == ' ' || out.back() == '.')) out.pop_back();
+    return out.empty() ? "preset" : out;
+}
+
+std::string csv(const std::string& s) {
+    std::string out = "\"";
+    for (const char c : s) out += c == '"' ? std::string("\"\"") : std::string(1, c);
+    return out + "\"";
+}
+
+}  // namespace
+
+expected<fs::path, std::string> write_library(const fs::path& root, const HarvestResult& result, const host::PluginInfo& info,
+                                              const std::vector<host::ParamDesc>& params, const output::ValueText& text) {
+    const fs::path dir = opt::plugin_file_path(root, info, "");
+    std::error_code ec;
+    fs::create_directories(dir, ec);
+    if (ec) return unexpected("cannot create " + dir.string());
+    // A re-harvest replaces the library: the files the previous index listed go, nothing else in the folder.
+    if (std::ifstream old(dir / "index.json", std::ios::binary); old) {
+        std::stringstream ss;
+        ss << old.rdbuf();
+        if (auto v = json::parse(ss.str()))
+            for (const auto& e : (*v)["presets"].as_array())
+                for (const char* key : {"state", "params"}) {
+                    const std::string name = e[key].as_string();
+                    if (!name.empty() && fs::path(name).filename() == fs::path(name)) fs::remove(dir / name, ec);
+                }
+    }
+
+    json::Array presets;
+    std::string report = "number,name,method,index,outcome,duplicate_of,difference,params_reproduce,state_hash,message\n";
+    for (const auto& e : result.entries) {
+        json::Value v;
+        v.set("number", e.number).set("name", e.name).set("method", std::string(host::to_string(e.ref.method)))
+            .set("ref", host::to_json(e.ref)).set("outcome", std::string(to_string(e.outcome))).set("message", e.message)
+            .set("state_hash", e.state_hash).set("duplicate_of", e.duplicate_of).set("difference", e.difference)
+            .set("params_reproduce", e.params_reproduce);
+        if (e.outcome == PresetOutcome::Ok) {
+            const std::string stem = std::format("{:03}-{}", e.number, file_safe(e.name));
+            if (auto w = output::write_bytes(dir / (stem + ".state"), e.captured.state); !w) return unexpected(w.error());
+            auto pj = output::params_json(info, params, e.captured.coords, text);
+            pj.set("preset", e.name).set("method", std::string(host::to_string(e.ref.method)));
+            if (auto w = output::write_text(dir / (stem + ".params.json"), pj.dump(2) + "\n"); !w) return unexpected(w.error());
+            v.set("state", stem + ".state").set("params", stem + ".params.json");
+        }
+        presets.push_back(std::move(v));
+        report += std::format("{},{},{},{},{},{},{:.4f},{},{},{}\n", e.number, csv(e.name), host::to_string(e.ref.method), e.ref.index,
+                              to_string(e.outcome), e.duplicate_of, e.difference, e.params_reproduce ? "yes" : "no", e.state_hash,
+                              csv(e.message));
+    }
+    json::Array methods;
+    for (const auto& m : result.methods) {
+        json::Value v;
+        v.set("method", std::string(host::to_string(m.method))).set("offered", m.offered).set("tried", m.tried).set("ok", m.ok)
+            .set("note", m.note);
+        methods.push_back(std::move(v));
+    }
+    json::Value index;
+    index.set("format", std::string(host::to_string(info.format))).set("plugin", info.name).set("vendor", info.vendor)
+        .set("uid", info.uid).set("version_hash", info.version_hash).set("floor", result.floor).set("threshold", result.threshold)
+        .set("methods", std::move(methods)).set("presets", std::move(presets));
+    if (!result.listing_error.empty()) index.set("listing_error", result.listing_error);
+    if (result.recipe) index.set("recipe", result.recipe->to_json());
+    if (auto w = output::write_text(dir / "index.json", index.dump(2) + "\n"); !w) return unexpected(w.error());
+    if (auto w = output::write_text(dir / "harvest-report.csv", report); !w) return unexpected(w.error());
+    return dir;
+}
+
+}  // namespace mimicry::targets

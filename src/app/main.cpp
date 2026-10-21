@@ -1,5 +1,5 @@
 // mimicry: supervisor / command line (docs/spec/01_ARCHITECTURE.md section 6).
-// Implemented: list, probe, fit, fingerprint, replay. The rest are implemented in the order of docs/PROJECT_PLAN.md.
+// Implemented: list, probe, fit, fingerprint, harvest, replay. The rest are implemented in the order of docs/PROJECT_PLAN.md.
 // Plugins are only ever loaded in mimicry_worker processes (CLAUDE.md rule 4); --no-isolation renders
 // in-process for debugging.
 
@@ -34,8 +34,10 @@
 #include "opt/Profile.hpp"
 #include "opt/Space.hpp"
 #include "output/FailureReport.hpp"
+#include "output/PresetExport.hpp"
 #include "supervisor/WorkerClient.hpp"
 #include "supervisor/WorkerPool.hpp"
+#include "targets/Harvest.hpp"
 
 namespace {
 
@@ -52,6 +54,7 @@ constexpr Command kCommands[] = {
     {"list", "list <plugin>", "enumerate parameters with units, flags and semantics"},
     {"probe", "probe <plugin>", "sensitivity, safe range and hazard probe; writes the plugin profile"},
     {"fit", "fit --plugin P --wav T.wav", "match a WAV"},
+    {"harvest", "harvest <plugin>", "collect the plugin's presets as verified states (preset library)"},
     {"transfer", "transfer --source A --target B", "match source presets in another plugin (any format mix)"},
     {"image", "image --plugin P --image I.png", "match an image"},
     {"fingerprint", "fingerprint <plugin>", "build the random-preset feature database"},
@@ -80,6 +83,13 @@ fit options:
   --kind note|hit|texture|loop                      --w-<feature> N
   --solve-gain         closed-form gain even with a level parameter
   --out DIR            run directory root (default: runs)
+
+harvest options:
+  --from F,G           preset files or folders (.state, .vstpreset; --raw-files: any file as state)
+  --method M           only file|clap-preset|program-data|program-list|midi-program|program-param
+  --all-methods        try every method (default: stop at the first that yields presets)
+  --max N              presets to collect    --wait-ms MS (200) after each load
+  --no-recipe          ignore the profile's recipe    --out DIR library root (default: presets)
 
 probe options: --no-pairs      fingerprint options: --count N (2000)
 replay options: --plugin P (default: the path in the report)   --isolated (render in a worker)
@@ -120,7 +130,8 @@ struct Args {
     }
 };
 
-constexpr std::string_view kFlags[] = {"--no-isolation", "--no-prior", "--no-pairs", "--solve-gain", "--isolated"};
+constexpr std::string_view kFlags[] = {"--no-isolation", "--no-prior", "--no-pairs", "--solve-gain", "--isolated",
+                                       "--all-methods", "--raw-files", "--no-recipe"};
 
 Args parse_args(int argc, char** argv, int first) {
     Args a;
@@ -282,7 +293,10 @@ int cmd_probe(const Args& a) {
     out += std::format("floor {:.3f} dB, {:.1f} ms per render, {} pairs probed, {} interact\n", prof->floor_db,
                        prof->render_ms, prof->pairs.size(), joined);
     const auto path = opt::Profile::default_path(profiles_dir(a), p.info);
-    if (const auto old = load_profile(a, p.info)) prof->constraints = old->constraints;  // learned by earlier fits
+    if (const auto old = load_profile(a, p.info)) {  // learned by earlier fits and harvests
+        prof->constraints = old->constraints;
+        prof->recipe = old->recipe;
+    }
     if (auto r = prof->save(path); !r) return fail("probe", r.error());
     out += "wrote " + path.string() + "\n";
     std::fputs(out.c_str(), stdout);
@@ -317,32 +331,6 @@ int cmd_fingerprint(const Args& a) {
     if (auto r = db.save(path); !r) return fail("fingerprint", r.error());
     std::fputs(std::format("{} valid of {} rendered; wrote {}\n", db.size(), db.rendered, path.string()).c_str(), stdout);
     return 0;
-}
-
-json::Value params_json(const host::PluginInfo& info, const std::vector<host::ParamDesc>& params,
-                        const std::vector<double>& coords, const std::function<std::string(std::uint32_t, double)>& text) {
-    json::Value v;
-    v.set("format", std::string(host::to_string(info.format)));
-    v.set("plugin", info.name);
-    v.set("uid", info.uid);
-    v.set("version_hash", info.version_hash);
-    json::Array ps;
-    for (std::size_t i = 0; i < params.size(); ++i) {
-        json::Value e;
-        e.set("id", params[i].id);
-        e.set("name", params[i].name);
-        e.set("module", params[i].module);
-        e.set("normalised", coords[i]);
-        e.set("display", text(params[i].id, coords[i]));
-        ps.push_back(std::move(e));
-    }
-    v.set("params", json::Value(std::move(ps)));
-    return v;
-}
-
-void write_text(const fs::path& path, const std::string& text) {
-    std::ofstream f(path, std::ios::binary);
-    f << text;
 }
 
 int cmd_fit(const Args& a) {
@@ -490,7 +478,7 @@ int cmd_fit(const Args& a) {
         return p.local->value_text(id, u);
     };
     auto save_match = [&](const opt::Candidate& c, const fs::path& stem) {
-        auto pj = params_json(p.info, p.params, c.coords, text);
+        auto pj = output::params_json(p.info, p.params, c.coords, text);
         pj.set("loss_db", c.eval.loss);
         pj.set("gain_db", c.eval.score.gain_db);
         json::Object losses;
@@ -498,7 +486,8 @@ int cmd_fit(const Args& a) {
             losses[std::string(features::to_string(features::Feature(f)))] = c.eval.score.loss[f];
         pj.set("features", json::Value(std::move(losses)));
         pj.set("notes", host::to_json(job)["notes"]);
-        write_text(fs::path(stem.string() + ".params.json"), pj.dump(2) + "\n");
+        if (auto w = output::write_text(fs::path(stem.string() + ".params.json"), pj.dump(2) + "\n"); !w)
+            std::fputs(("mimicry fit: " + w.error() + "\n").c_str(), stderr);
         if (auto audio = obj.render(c.coords)) {
             WavData w{audio->sample_rate, audio->channels, audio->samples};
             (void)write_wav(fs::path(stem.string() + ".wav"), w);
@@ -603,7 +592,7 @@ int cmd_fit(const Args& a) {
     json::Array topk;
     for (const auto& t : res.top_k) topk.push_back(t.eval.loss);
     result.set("top_k_loss_db", json::Value(std::move(topk)));
-    write_text(dir / "result.json", result.dump(2) + "\n");
+    if (auto w = output::write_text(dir / "result.json", result.dump(2) + "\n"); !w) return fail("fit", w.error());
 
     std::string summary = std::format("\nbest {:.3f} dB (gain {:+.1f} dB) after {} evaluations in {:.0f} s\n", res.best.eval.loss,
                                       res.best.eval.score.gain_db, res.evals, res.seconds);
@@ -624,6 +613,86 @@ int cmd_fit(const Args& a) {
 
 // Re-runs a failure report (spec 05 section 7). In-process by default, so the plugin can be watched under
 // a debugger (a crash then takes mimicry down: that is the point); --isolated renders in a worker.
+// docs/spec/06_TARGETS.md section 6. One worker: presets are loaded and verified one after the other.
+int cmd_harvest(const Args& a) {
+    if (a.positional.empty()) return fail("harvest", "usage: mimicry harvest <plugin> [--from F] [--method M] [--all-methods]");
+    const std::string path = a.positional[0];
+    if (auto f = host::format_from_path(path); !f) return fail("harvest", f.error());
+    std::unique_ptr<host::Instance> inst;
+    if (a.has("--no-isolation")) {
+        auto r = host::open(path);
+        if (!r) return fail("harvest", r.error().message);
+        inst = std::move(*r);
+    } else {
+        auto r = supervisor::WorkerClient::open(path);
+        if (!r) return fail("harvest", r.error().message);
+        inst = std::move(*r);
+    }
+    const host::PluginInfo info = inst->info();
+    const auto params = inst->parameters();
+
+    targets::HarvestOptions ho;
+    for (const auto& f : split(a.get("--from"))) ho.from.emplace_back(f);
+    ho.raw_files = a.has("--raw-files");
+    ho.all_methods = a.has("--all-methods");
+    if (a.has("--method")) {
+        ho.method = host::parse_preset_method(a.get("--method"));
+        if (!ho.method) return fail("harvest", "unknown method '" + a.get("--method") + "'");
+    }
+    ho.max_presets = int(a.num("--max", 0));
+    ho.wait_ms = a.num("--wait-ms", ho.wait_ms);
+    auto stored = load_profile(a, info);
+    if (stored && stored->recipe && !a.has("--no-recipe")) {
+        ho.recipe = stored->recipe;
+        std::fputs(std::format("using the recipe in the profile: {}\n", host::to_string(stored->recipe->method)).c_str(), stdout);
+    }
+    int key = 48;
+    if (a.has("--note")) key = features::parse_note_name(a.get("--note")).value_or(48);
+    ho.plan = note_job(a, key, 0, 600);
+    if (stored && stored->settle_ms > 0) ho.plan.settle_ms = std::max(ho.plan.settle_ms, 1.5 * stored->settle_ms);
+    ho.plan.settle_ms = a.num("--settle-ms", ho.plan.settle_ms);
+    ho.plan.tail_max_ms = 2000;
+    ho.progress = [](const targets::HarvestEntry& e) {
+        std::fputs(std::format("  {:<13} {:>3} {:<24} {}{}\n", host::to_string(e.ref.method), e.ref.index,
+                               e.name.empty() ? "-" : e.name, targets::to_string(e.outcome),
+                               e.outcome == targets::PresetOutcome::Ok ? std::format(" #{}", e.number)
+                               : e.message.empty()                    ? std::string()
+                                                                      : " (" + e.message + ")")
+                       .c_str(),
+                   stdout);
+    };
+
+    auto res = targets::harvest(*inst, ho);
+    if (!res) return fail("harvest", res.error());
+    auto dir = targets::write_library(a.get("--out", "presets"), *res, info, params,
+                                      [&](std::uint32_t id, double u) { return inst->value_text(id, u); });
+    if (!dir) return fail("harvest", dir.error());
+
+    std::string out;
+    if (!res->listing_error.empty()) out += "the plugin's preset listing failed: " + res->listing_error + "\n";
+    for (const auto& m : res->methods)
+        out += std::format("{}: {} offered, {} tried, {} ok{}\n", host::to_string(m.method), m.offered, m.tried, m.ok,
+                           m.note.empty() ? "" : "; " + m.note);
+    out += std::format("{} presets in {}\n", res->ok_count(), dir->string());
+    // The recipe (WP5.10): the method that worked goes into the profile, so the next harvest starts there.
+    if (res->recipe) {
+        opt::Profile prof = stored ? *stored : opt::Profile{};
+        if (!stored) {
+            prof.format = info.format;
+            prof.uid = info.uid;
+            prof.name = info.name;
+            prof.vendor = info.vendor;
+            prof.version_hash = info.version_hash;
+        }
+        prof.recipe = res->recipe;
+        const auto ppath = opt::Profile::default_path(profiles_dir(a), info);
+        if (auto r = prof.save(ppath); !r) std::fputs(std::format("note: {}\n", r.error()).c_str(), stderr);
+        else out += std::format("recipe ({}) stored in {}\n", host::to_string(res->recipe->method), ppath.string());
+    }
+    std::fputs(out.c_str(), stdout);
+    return res->ok_count() > 0 ? 0 : 1;
+}
+
 int cmd_replay(const Args& a) {
     if (a.positional.empty()) return fail("replay", "usage: mimicry replay <crash.json> [--plugin P] [--isolated]");
     auto report = output::FailureReport::load(a.positional[0]);
@@ -686,6 +755,7 @@ int main(int argc, char** argv) {
     if (cmd == "fit") return cmd_fit(args);
     if (cmd == "fingerprint") return cmd_fingerprint(args);
     if (cmd == "replay") return cmd_replay(args);
+    if (cmd == "harvest") return cmd_harvest(args);
     for (const auto& c : kCommands)
         if (c.name == cmd) return not_implemented(cmd);
     std::fputs(std::format("mimicry: unknown command '{}' (try --help)\n", cmd).c_str(), stderr);

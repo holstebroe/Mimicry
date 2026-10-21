@@ -2,9 +2,13 @@
 
 #include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <cmath>
 #include <exception>
 #include <format>
+#include <fstream>
+#include <iterator>
+#include <thread>
 
 #include "host/ParamUtil.hpp"
 
@@ -45,6 +49,17 @@ void RenderThread::run(const std::function<void()>& fn) {
     cv_.notify_all();
     cv_.wait(lock, [this] { return done_; });
     done_ = false;
+}
+
+// --- Engine defaults -------------------------------------------------------------------------
+
+expected<void, HostError> Engine::load_preset(const PresetRef& ref) {
+    if (ref.method != PresetMethod::File)
+        return unexpected(HostError{std::format("preset method '{}' is not supported by this plugin", to_string(ref.method))});
+    std::ifstream f(ref.location, std::ios::binary);
+    if (!f) return unexpected(HostError{std::format("cannot read '{}'", ref.location)});
+    const std::vector<std::uint8_t> blob((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+    return load_state(blob);
 }
 
 // --- Renderer --------------------------------------------------------------------------------
@@ -167,6 +182,157 @@ expected<void, HostError> Renderer::restart_engine() {
 
 expected<void, HostError> Renderer::reset() { return restart_engine(); }
 
+expected<std::vector<PresetRef>, HostError> Renderer::presets() {
+    std::vector<PresetRef> out;
+    try {
+        out = engine_->presets();
+    } catch (...) {
+        return unexpected(HostError{"presets: plugin threw"});
+    }
+    // Program parameters (the heuristic step of the ladder, 06 section 6), for both formats alike: a stepped
+    // program-change parameter that no program list already drives, one preset per value.
+    for (const ParamDesc& p : engine_->parameters()) {
+        if (!p.flags.program_change || p.steps < 2 || p.flags.readonly) continue;
+        const bool listed = std::ranges::any_of(out, [&](const PresetRef& r) {
+            return r.method == PresetMethod::ProgramList && r.param_id == p.id;
+        });
+        if (listed) continue;
+        for (int i = 0; i < p.steps; ++i) {
+            PresetRef r;
+            r.method = PresetMethod::ProgramParam;
+            r.param_id = p.id;
+            r.index = i;
+            r.count = p.steps;
+            r.name = value_text(p.id, static_cast<double>(i) / (p.steps - 1));
+            out.push_back(std::move(r));
+        }
+    }
+    return out;
+}
+
+expected<void, HostError> Renderer::run_silence(int frames, std::span<const ParamValue> first, int program, int bank) {
+    std::vector<float> left(static_cast<std::size_t>(max_block_)), right(static_cast<std::size_t>(max_block_));
+    int done = 0;
+    bool head = true;
+    while (head || done < frames) {
+        const int n = std::min(max_block_, std::max(frames - done, 1));
+        Block b{n, head ? first : std::span<const ParamValue>{}, {}, head ? program : -1, head ? bank : -1};
+        expected<void, HostError> r;
+        thread_.run([&] { r = guarded("process", [&] { return engine_->process(b, left.data(), right.data()); }); });
+        if (!r) return r;
+        head = false;
+        done += n;
+    }
+    return {};
+}
+
+expected<CapturedPreset, HostError> Renderer::apply_preset(const PresetRef& ref, double wait_ms) {
+    message_.clear();
+    // From the clean state, so a preset never inherits what the previous one set.
+    if (auto r = restart_engine(); !r) return unexpected(r.error());
+    if (!clean_.empty())
+        if (auto r = load_state(clean_); !r) return unexpected(r.error());
+    const auto& params = engine_->parameters();
+    const int wait_frames = std::max(frames_for(wait_ms, rate_), 1);
+
+    auto param_index = [&](std::uint32_t id) -> std::optional<std::size_t> {
+        for (std::size_t i = 0; i < params.size(); ++i)
+            if (params[i].id == id) return i;
+        return std::nullopt;
+    };
+
+    expected<void, HostError> loaded;
+    switch (ref.method) {
+        case PresetMethod::File:
+        case PresetMethod::ClapPreset:
+        case PresetMethod::ProgramData: {
+            loaded = guarded("load_preset", [&] { return engine_->load_preset(ref); });
+            if (!loaded) break;
+            // An asynchronous load (CLAP preset-load) reports `loaded` or `on_error` on the main thread. A plugin
+            // need not report at all, so after the wait the load is taken as done [D]. The wait is 10 × wait_ms
+            // until a load ends unreported; from then on only wait_ms, until the plugin reports again [D].
+            const double factor = preset_unreported_ ? 1.0 : 10.0;
+            const auto until = std::chrono::steady_clock::now() + std::chrono::duration<double, std::milli>(std::max(wait_ms, 1.0) * factor);
+            for (;;) {
+                pump();
+                const PresetLoadStatus st = engine_->preset_status();
+                if (!st.error.empty()) {
+                    loaded = unexpected(HostError{"the plugin reported a load error: " + st.error});
+                    preset_unreported_ = false;
+                    break;
+                }
+                if (!st.pending) {
+                    preset_unreported_ = false;
+                    break;
+                }
+                if (std::chrono::steady_clock::now() >= until) {
+                    preset_unreported_ = true;
+                    break;
+                }
+                std::this_thread::sleep_for(std::chrono::milliseconds(2));
+            }
+            if (loaded) loaded = run_silence(wait_frames, {}, -1, -1);
+            break;
+        }
+        case PresetMethod::ProgramList:
+        case PresetMethod::ProgramParam: {
+            if (!param_index(ref.param_id) || ref.count < 1) {
+                loaded = unexpected(HostError{std::format("no program parameter {}", ref.param_id)});
+                break;
+            }
+            // The one place a program-change parameter is sent (spec 05 section 9).
+            const double u = ref.count > 1 ? static_cast<double>(ref.index) / (ref.count - 1) : 0.0;
+            const ParamValue pv{ref.param_id, std::clamp(u, 0.0, 1.0)};
+            try {
+                engine_->apply_controller_values(std::span<const ParamValue>(&pv, 1));
+            } catch (...) {
+            }
+            loaded = run_silence(wait_frames, std::span<const ParamValue>(&pv, 1), -1, -1);
+            break;
+        }
+        case PresetMethod::MidiProgram:
+            if (!engine_->midi_program_change()) {
+                loaded = unexpected(HostError{"the plugin takes no MIDI program change"});
+                break;
+            }
+            loaded = run_silence(wait_frames, {}, std::clamp(ref.index, 0, 127), ref.bank);
+            break;
+    }
+    if (loaded) loaded = handle_restart_request();
+    if (!loaded) {
+        recover();
+        return unexpected(loaded.error());
+    }
+
+    CapturedPreset out;
+    out.name = ref.name;
+    auto st = save_state();
+    if (!st) {
+        recover();
+        return unexpected(st.error());
+    }
+    out.state = std::move(*st);
+    // Loading the blob back proves it loads on its own and brings a separate controller (VST3) in line, so the
+    // values read next are the ones the state holds.
+    if (auto r = load_state(out.state); !r) {
+        recover();
+        return unexpected(HostError{"the captured state does not load back: " + r.error().message});
+    }
+    pump();
+    out.coords.reserve(params.size());
+    for (const ParamDesc& p : params) {
+        std::optional<double> u;
+        try {
+            u = engine_->param_coord(p.id);
+        } catch (...) {
+        }
+        out.coords.push_back(u && std::isfinite(*u) ? std::clamp(*u, 0.0, 1.0) : p.default_coord);
+    }
+    // Back to the clean state: later renders must not inherit the preset's hidden state.
+    if (auto r = restart_engine(); r && !clean_.empty()) (void)load_state(clean_);
+    return out;
+}
+
 Outcome Renderer::fail(Outcome outcome, std::string message) {
     message_ = std::move(message);
     return outcome;
@@ -188,7 +354,8 @@ expected<Audio, Outcome> Renderer::render(const Job& job) {
 expected<Audio, Outcome> Renderer::render_once(const Job& job) {
     message_.clear();
     const auto& params = engine_->parameters();
-    if (job.coords.size() != params.size())
+    const bool from_state = !job.state.empty();
+    if (!from_state && job.coords.size() != params.size())
         return unexpected(fail(Outcome::HostError, std::format("job has {} coordinates, plugin has {} parameters",
                                                               job.coords.size(), params.size())));
     if (job.sample_rate != rate_ || job.block_size > max_block_ || job.block_size < 1) {
@@ -196,9 +363,12 @@ expected<Audio, Outcome> Renderer::render_once(const Job& job) {
         rate_ = job.sample_rate;
         max_block_ = std::max(job.block_size, 1);
         if (auto r = restart_engine(); !r) return unexpected(fail(Outcome::HostError, r.error().message));
-    } else if (reset_each_render_) {
+    } else if (reset_each_render_ || from_state) {
         if (auto r = restart_engine(); !r) return unexpected(fail(Outcome::HostError, r.error().message));
     }
+    // A source render of a harvested preset: the complete state replaces the vector (spec 02 section 7).
+    if (from_state)
+        if (auto r = load_state(job.state); !r) return unexpected(fail(Outcome::HostError, r.error().message));
 
     // The full vector. Read-only and program-change parameters are never sent: sending even its default IS a
     // program change (a wrapper turns it into a MIDI program change that may land after the values and
@@ -206,7 +376,7 @@ expected<Audio, Outcome> Renderer::render_once(const Job& job) {
     // pinned to its default.
     std::vector<ParamValue> values;
     values.reserve(params.size());
-    for (std::size_t i = 0; i < params.size(); ++i) {
+    for (std::size_t i = 0; i < params.size() && !from_state; ++i) {
         const ParamDesc& p = params[i];
         if (p.flags.readonly || p.flags.program_change) continue;
         const double u = p.flags.bypass ? p.default_coord : job.coords[i];

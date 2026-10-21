@@ -48,6 +48,9 @@ public:
         put(job.peak_limit);
         put(job.allow_silent);
         put(job.bend_range);
+        // A state render keys on the whole blob: two presets may share every coordinate.
+        put(std::uint64_t(job.state.size()));
+        k.append(reinterpret_cast<const char*>(job.state.data()), job.state.size());
         return k;
     }
 

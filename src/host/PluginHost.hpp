@@ -10,6 +10,7 @@
 #include <cstdint>
 #include <filesystem>
 #include <memory>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -91,6 +92,45 @@ struct Job {
     // > 0: a note's cents go out as MIDI pitch bend with this measured range in semitones instead of the
     // format's tuning (spec 02 section 5, for plugins that ignore tuning). Bend is channel-wide.
     double bend_range = 0;
+    // Non-empty: a source render of a harvested preset (spec 02 section 7). After the reset the render core
+    // loads this complete state instead of sending `coords` (which may then be empty). Still a full state,
+    // never a delta (CLAUDE.md rule 5).
+    std::vector<std::uint8_t> state;
+};
+
+// How a preset is applied (docs/spec/02_HOSTING.md section 7), in the order the harvest ladder tries them
+// (06 section 6).
+enum class PresetMethod {
+    File,          // a state file: CLAP state blob, .vstpreset, or (opt-in) a raw plugin file as state
+    ClapPreset,    // CLAP preset discovery + preset-load
+    ProgramData,   // VST3 IProgramListData::getProgramData
+    ProgramList,   // VST3 IUnitInfo program list through its program-change parameter
+    MidiProgram,   // MIDI program change (CLAP, note port with the MIDI dialect)
+    ProgramParam,  // heuristic: a stepped parameter named Program / Preset / Patch, or a bare program-change parameter
+};
+[[nodiscard]] std::string_view to_string(PresetMethod method) noexcept;
+[[nodiscard]] std::optional<PresetMethod> parse_preset_method(std::string_view text) noexcept;
+
+// One preset a plugin offers or a file holds. Which fields count depends on the method.
+struct PresetRef {
+    PresetMethod method = PresetMethod::File;
+    std::string name;              // from the plugin where the format offers one, else empty
+    std::string location;          // File: the path. ClapPreset: the file location, "" for the plugin's own
+    std::string load_key;          // ClapPreset: the load key, "" for none
+    bool location_is_file = false; // ClapPreset: CLAP_PRESET_DISCOVERY_LOCATION_FILE
+    std::uint32_t list_id = 0;     // ProgramData / ProgramList: the VST3 program list id
+    std::uint32_t param_id = 0;    // ProgramList / ProgramParam: the program-change parameter
+    int index = 0;                 // program index (MidiProgram: the program number)
+    int count = 0;                 // programs in the list, or values of the parameter
+    int bank = -1;                 // MidiProgram: bank select (CC 0 / CC 32), -1 for none
+};
+
+// A loaded preset, normalised (spec 02 section 7): the plugin's complete state plus every parameter read
+// back in the Mimicry coordinate, so a source can render from either.
+struct CapturedPreset {
+    std::vector<std::uint8_t> state;
+    std::vector<double> coords;    // one per parameters() entry
+    std::string name;
 };
 
 struct Audio {
@@ -125,6 +165,15 @@ public:
     [[nodiscard]] virtual expected<std::vector<std::uint8_t>, HostError> save_state() = 0;
     [[nodiscard]] virtual expected<void, HostError> load_state(const std::vector<std::uint8_t>& blob) = 0;
     [[nodiscard]] virtual expected<void, HostError> reset() = 0;
+
+    // Presets the plugin itself declares: CLAP preset discovery, VST3 program lists and program data, MIDI
+    // program change (CLAP), stepped program parameters (spec 02 section 7). Files are the caller's.
+    [[nodiscard]] virtual expected<std::vector<PresetRef>, HostError> presets() = 0;
+    // Loads one preset from a clean state, waits up to `wait_ms` for the plugin to finish (CLAP `loaded`,
+    // a program change processed), and returns the captured state and parameters. The instance is back at
+    // its clean state afterwards, so later renders are unaffected. Only harvest-type jobs call this (05
+    // section 9), never a fit.
+    [[nodiscard]] virtual expected<CapturedPreset, HostError> apply_preset(const PresetRef& ref, double wait_ms = 200) = 0;
 };
 
 // Opens a plugin by path (format from the extension) in THIS process. `uid` picks one plugin of a

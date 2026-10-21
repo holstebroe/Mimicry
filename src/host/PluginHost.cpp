@@ -4,6 +4,7 @@
 #include <cctype>
 #include <format>
 #include <thread>
+#include <utility>
 
 #include "host/Engine.hpp"
 #include "host/Renderer.hpp"
@@ -16,6 +17,29 @@ std::string_view to_string(PluginFormat format) noexcept {
         case PluginFormat::Vst3: return "VST3";
     }
     return "unknown";
+}
+
+namespace {
+constexpr std::pair<PresetMethod, std::string_view> kPresetMethods[] = {
+    {PresetMethod::File, "file"},
+    {PresetMethod::ClapPreset, "clap-preset"},
+    {PresetMethod::ProgramData, "program-data"},
+    {PresetMethod::ProgramList, "program-list"},
+    {PresetMethod::MidiProgram, "midi-program"},
+    {PresetMethod::ProgramParam, "program-param"},
+};
+}  // namespace
+
+std::string_view to_string(PresetMethod method) noexcept {
+    for (const auto& [m, name] : kPresetMethods)
+        if (m == method) return name;
+    return "unknown";
+}
+
+std::optional<PresetMethod> parse_preset_method(std::string_view text) noexcept {
+    for (const auto& [m, name] : kPresetMethods)
+        if (name == text) return m;
+    return std::nullopt;
 }
 
 expected<PluginFormat, std::string> format_from_path(const std::filesystem::path& path) {

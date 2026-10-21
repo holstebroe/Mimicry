@@ -201,7 +201,7 @@ std::uint64_t WorkerClient::blocks_done() const {
 expected<host::Audio, Outcome> WorkerClient::render(const host::Job& job) {
     auto r = render_once(job);
     if (r) {
-        if (options_.canary && (!canary_ || canary_->coords != job.coords)) {
+        if (options_.canary && (!canary_ || canary_->coords != job.coords || canary_->state != job.state)) {
         // Only pass or fail matters for the canary, and the checks fire during the notes: a short tail keeps
         // the check after every failure cheap.
         canary_ = job;
@@ -243,8 +243,13 @@ expected<host::Audio, Outcome> WorkerClient::render_once(const host::Job& job) {
     }
 
     const double timeout = std::max(options_.min_timeout_s, options_.timeout_factor * plan_seconds(job));
+    if (job.state.size() > payload()) {
+        message_ = "state larger than the shared memory";
+        return unexpected(Outcome::HostError);
+    }
+    if (!job.state.empty()) std::memcpy(shm_.data(), job.state.data(), job.state.size());
     json::Value req, reply;
-    req.set("cmd", "render").set("job", host::to_json(job));
+    req.set("cmd", "render").set("job", host::to_json(job)).set("state_bytes", job.state.size());
     std::string detail;
     switch (call(req, timeout, reply, detail)) {
         case Call::Ok: break;
@@ -344,6 +349,67 @@ expected<void, HostError> WorkerClient::load_state(const std::vector<std::uint8_
     }
     if (!reply["ok"].as_bool()) return unexpected(HostError{reply["error"].as_string()});
     return {};
+}
+
+expected<std::vector<host::PresetRef>, HostError> WorkerClient::presets() {
+    if (!open_) {
+        if (auto r = start_worker(); !r) return unexpected(r.error());
+    }
+    json::Value req, reply;
+    req.set("cmd", "presets");
+    std::string detail;
+    // Crawling a large preset folder can take a while.
+    if (call(req, options_.open_timeout_s, reply, detail) != Call::Ok) {
+        open_ = false;
+        return unexpected(HostError{"worker lost while listing presets: " + detail});
+    }
+    if (!reply["ok"].as_bool()) return unexpected(HostError{reply["error"].as_string()});
+    std::vector<host::PresetRef> out;
+    for (const auto& r : reply["presets"].as_array()) {
+        auto ref = host::preset_from_json(r);
+        if (!ref) return unexpected(HostError{ref.error()});
+        out.push_back(std::move(*ref));
+    }
+    return out;
+}
+
+expected<host::CapturedPreset, HostError> WorkerClient::apply_preset(const host::PresetRef& ref, double wait_ms) {
+    if (!table_change_.empty()) return unexpected(HostError{"the plugin's parameter table changed: " + table_change_});
+    if (!open_) {
+        if (auto r = start_worker(); !r) return unexpected(r.error());
+    }
+    json::Value req, reply;
+    req.set("cmd", "apply_preset").set("ref", host::to_json(ref)).set("wait_ms", wait_ms);
+    std::string detail;
+    switch (call(req, options_.call_timeout_s + 0.02 * wait_ms, reply, detail)) {
+        case Call::Ok: break;
+        case Call::Timeout:
+            ++stats_.timeouts;
+            open_ = false;
+            return unexpected(HostError{"timeout: no answer while loading the preset; worker killed"});
+        case Call::Crashed:
+            ++stats_.crashes;
+            open_ = false;
+            return unexpected(HostError{"crash: the worker died while loading the preset (" + detail + ")"});
+    }
+    if (!reply["ok"].as_bool()) return unexpected(HostError{reply["error"].as_string()});
+    // A preset load may make the plugin rescan its table; such a change is final, as for renders.
+    if (const auto v = static_cast<std::uint64_t>(reply["version"].as_number(static_cast<double>(version_))); v != version_) {
+        json::Value dreq, desc;
+        dreq.set("cmd", "describe");
+        if (call(dreq, options_.call_timeout_s, desc, detail) == Call::Ok && desc["ok"].as_bool()) adopt(desc);
+        version_ = v;
+        if (!table_change_.empty()) return unexpected(HostError{"the plugin's parameter table changed: " + table_change_});
+    }
+    const auto n = static_cast<std::size_t>(reply["bytes"].as_number());
+    if (n > payload()) return unexpected(HostError{"bad state size"});
+    host::CapturedPreset cap;
+    const auto* p = static_cast<const std::uint8_t*>(shm_.data());
+    cap.state.assign(p, p + n);
+    for (const auto& c : reply["coords"].as_array()) cap.coords.push_back(c.as_number());
+    cap.name = reply["name"].as_string();
+    if (cap.coords.size() != params_.size()) return unexpected(HostError{"the worker returned a different parameter count"});
+    return cap;
 }
 
 expected<void, HostError> WorkerClient::reset() {

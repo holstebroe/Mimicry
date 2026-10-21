@@ -54,6 +54,19 @@ struct PairProfile {
     bool separable = true;
 };
 
+// How this plugin's presets were harvested (spec 06 section 6, WP5.10): the method that worked and its
+// details, so the next harvest goes straight to it. Plain JSON, shareable.
+struct HarvestRecipe {
+    host::PresetMethod method = host::PresetMethod::ClapPreset;
+    std::uint32_t param_id = 0;  // program list / program parameter
+    std::uint32_t list_id = 0;   // VST3 program list
+    int count = 0;               // programs the method offered
+    int found = 0;               // presets it yielded (ok)
+    double wait_ms = 200;        // settle / wait after each load
+    [[nodiscard]] json::Value to_json() const;
+    [[nodiscard]] static expected<HarvestRecipe, std::string> from_json(const json::Value& v);
+};
+
 struct Profile {
     host::PluginFormat format = host::PluginFormat::Clap;
     std::string uid, name, vendor, version_hash;
@@ -65,6 +78,7 @@ struct Profile {
     std::vector<PairProfile> pairs;
     std::vector<Constraint> constraints;  // learned by failure bisection (spec 05 section 4), kept by `probe`
     PitchCalibration pitch;               // how the plugin takes fine pitch (spec 02 section 5)
+    std::optional<HarvestRecipe> recipe;  // written by `harvest`, kept by `probe` and `fit`
 
     // False for a profile that only carries constraints (written by a fit before any probe).
     [[nodiscard]] bool probed() const noexcept { return !params.empty(); }

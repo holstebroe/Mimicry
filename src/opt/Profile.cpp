@@ -165,7 +165,28 @@ json::Value Profile::to_json() const {
     pc.set("bend_cents", pitch.bend_cents);
     if (!pitch.note.empty()) pc.set("note", pitch.note);
     v.set("pitch", std::move(pc));
+    if (recipe) v.set("harvest_recipe", recipe->to_json());
     return v;
+}
+
+json::Value HarvestRecipe::to_json() const {
+    json::Value v;
+    v.set("method", std::string(host::to_string(method))).set("param_id", param_id).set("list_id", list_id)
+        .set("count", count).set("found", found).set("wait_ms", wait_ms);
+    return v;
+}
+
+expected<HarvestRecipe, std::string> HarvestRecipe::from_json(const json::Value& v) {
+    const auto m = host::parse_preset_method(v["method"].as_string());
+    if (!m) return unexpected("harvest recipe: unknown method '" + v["method"].as_string() + "'");
+    HarvestRecipe r;
+    r.method = *m;
+    r.param_id = static_cast<std::uint32_t>(v["param_id"].as_number());
+    r.list_id = static_cast<std::uint32_t>(v["list_id"].as_number());
+    r.count = static_cast<int>(v["count"].as_number());
+    r.found = static_cast<int>(v["found"].as_number());
+    r.wait_ms = v["wait_ms"].as_number(200);
+    return r;
 }
 
 expected<Profile, std::string> Profile::from_json(const json::Value& v) {
@@ -219,6 +240,11 @@ expected<Profile, std::string> Profile::from_json(const json::Value& v) {
     p.pitch.tuning_cents = pc["tuning_cents"].as_number();
     p.pitch.bend_cents = pc["bend_cents"].as_number();
     p.pitch.note = pc["note"].as_string();
+    if (v["harvest_recipe"].is_object()) {
+        auto r = HarvestRecipe::from_json(v["harvest_recipe"]);
+        if (!r) return unexpected("profile: " + r.error());
+        p.recipe = *r;
+    }
     return p;
 }
 

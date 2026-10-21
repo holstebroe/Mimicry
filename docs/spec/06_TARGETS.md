@@ -158,6 +158,32 @@ probe signals) differs from the default render by more than the repeatability fl
 `load-error`, `timeout`. A method whose first presets are all `no-change` is abandoned and the report
 says so.
 
+Implemented [A] (WP5.8, `targets/Harvest`, one worker): the verification render is one note (C3, 600 ms,
+velocity 100; `--note`, `--gate`) at the profile's settle time. "Differs" means a render difference of at
+least `max(2 × floor, 0.15)` [D: as the probe], where the difference is the larger of the embedding
+distance (04 §7) and the level difference in dB, and the floor is the difference between two renders of
+the defaults. The default state is saved after rendering the defaults [I]; since a coordinate round trip
+need not be bit-exact, a preset with the defaults' sound but not their exact state is still `no-change`.
+Order of checks: state equals the defaults → `no-change`; same state hash as an earlier `ok` preset →
+`duplicate`; the loaded state does not render → `load-error`; sound like the defaults → `no-change`; sound
+like an earlier preset → `duplicate`; a second render differs → `not-reproducible`; else `ok`, with a
+`params_reproduce` flag saying whether a render from the parameter snapshot alone matches (it does not for
+plugins with hidden state). Duplicates are checked across methods, so `--all-methods` collects each sound
+once. A method is abandoned when its first 3 presets are all `no-change` or failed [D]; MIDI program change,
+which cannot say how many programs exist, stops after 8 empty slots in a row [D] ("end of the bank"),
+while VST3 program lists and program data report their program count and are tried slot by slot to the
+end, empty slots included [A]. A state equal to the defaults or to an earlier `ok` preset is classified
+without a render. The defaults must render twice; a failed second render fails the harvest rather than
+setting a meaningless floor [A]. A failed preset listing (CLAP discovery, VST3 program lists) is reported
+on the console and as `listing_error` in `index.json`; file presets are still tried [A]. `--method` forces one method, `--all-methods` runs every method,
+`--max N` stops after N presets, `--wait-ms` sets the wait after each load (200 ms [D]). Files: `--from`
+files are tried whatever their extension; in `--from` folders `.state` (and `.vstpreset` for VST3), or
+every file with `--raw-files`; for VST3 also the standard folders (`~/.vst3/presets`, `/usr/share/vst3/presets`,
+`/usr/local/share/vst3/presets` on Linux; `~/Library/Audio/Presets`, `/Library/Audio/Presets` on macOS;
+`Documents\VST3 Presets`, `%APPDATA%\VST3 Presets`, `%PROGRAMDATA%\VST3 Presets` on Windows, each
+`/<vendor>/<plugin>`) [S: VST3 SDK]. A `params.json` as a preset source is not implemented yet. Effects
+are verified like instruments until the effect probe signals exist (WP5.7).
+
 **Names** come from the plugin where a format offers them: CLAP discovery metadata; VST3 program names
 (`IUnitInfo::getProgramName`) and the program-change parameter's value text; the file name for file
 presets. Otherwise a preset is `capture-NNN` (or `<method>-NNN`), and the user may rename it in
@@ -186,11 +212,19 @@ click and its wait time are stored in the recipe.
 
 **Recipe**: the method that worked, with its details (program-change parameter id and count, MIDI bank
 layout, wait times), is stored in the plugin profile (01 §7), so the next harvest of the same plugin
-goes straight to it, a taught click included. Recipes are plain JSON and can be shared.
+goes straight to it, a taught click included. Recipes are plain JSON and can be shared. Implemented [A]
+(WP5.10): `harvest_recipe` in the profile (method, the program parameter or list id of its first ok preset, presets offered and
+found, wait time), written by the first method that yields presets and kept by `probe` and `fit`; the
+next harvest tries that method first (that parameter or list first) and stops there if it yields
+presets; `--no-recipe` ignores it.
 
 **Output**: `presets/<format>-<uid>-<hash>/` holds, per preset, `NNN-<name>.state`,
 `NNN-<name>.params.json`, and an `index.json` (name, method, ref, state hash, outcome), plus
-`harvest-report.csv`. Nothing is written into the plugin's own preset folders (05 §8).
+`harvest-report.csv`. Nothing is written into the plugin's own preset folders (05 §8). Implemented [A]:
+files only for `ok` presets (numbered 1..N in harvest order), every tried preset in `index.json` and the
+report (number, name, method, index, outcome, duplicate of, difference, params reproduce, state hash,
+message), the per-method summary and the recipe in `index.json`; a re-harvest into the same folder first
+removes the files the previous `index.json` listed, and nothing else.
 
 ## 7. Least-error transfer [A]
 

@@ -57,6 +57,8 @@ public:
     [[nodiscard]] expected<std::vector<std::uint8_t>, HostError> save_state() override;
     [[nodiscard]] expected<void, HostError> load_state(const std::vector<std::uint8_t>& blob) override;
     [[nodiscard]] expected<void, HostError> reset() override;
+    [[nodiscard]] expected<std::vector<PresetRef>, HostError> presets() override;
+    [[nodiscard]] expected<CapturedPreset, HostError> apply_preset(const PresetRef& ref, double wait_ms = 200) override;
 
     // Reset before every render (default). Turning it off is for profiling only: a candidate must
     // start from a clean state (CLAUDE.md rule 5).
@@ -70,6 +72,9 @@ private:
     void recover();
     // Pending main-thread callbacks, then a requested restart: re-enumerate and bump the version.
     [[nodiscard]] expected<void, HostError> handle_restart_request();
+    // Silent blocks for `frames` frames; the first block carries `first` and the program change. Output is
+    // discarded (preset jobs).
+    [[nodiscard]] expected<void, HostError> run_silence(int frames, std::span<const ParamValue> first, int program, int bank);
 
     std::unique_ptr<Engine> engine_;
     std::shared_ptr<ThreadRoles> roles_;
@@ -83,6 +88,7 @@ private:
     std::string message_;
     std::vector<std::uint8_t> clean_;  // state right after the first activation
     bool have_clean_ = false;
+    bool preset_unreported_ = false;  // the last asynchronous preset load ended without loaded / on_error
     std::uint64_t* blocks_ = nullptr;
 };
 

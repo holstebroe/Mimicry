@@ -5,8 +5,9 @@ matches a WAV, an image, or another plugin's preset. C++20, CMake, no frameworks
 
 **Status: first working fit.** CLAP and VST3 hosting in isolated worker processes, the feature loss and
 the optimizer (CMA-ES pipeline, sensitivity probe, fingerprints) are in place: `mimicry list`, `probe`,
-`fingerprint` and `fit` work. Plugin-to-plugin transfer, image targets, reports and preset export are
-next: see `docs/PROJECT_PLAN.md` for the work packages and their order.
+`fingerprint`, `fit` and `harvest` (automatic preset harvest) work. Plugin-to-plugin transfer, image
+targets, reports and `.vstpreset` export are next: see `docs/PROJECT_PLAN.md` for the work packages and
+their order.
 
 ## What it will do
 
@@ -50,9 +51,9 @@ src/features/    pitch, features and loss
 src/host/        PluginHost interface, shared render core; clap/ and vst3/ backends
 src/worker/      mimicry_worker, the only process that loads plugins
 src/supervisor/  worker client and pool with watchdog
-src/targets/     WAV, plugin and image targets (planned)
+src/targets/     preset harvest; WAV, plugin and image targets (planned)
 src/opt/         encoding, objective, probe and profile, pipeline, fingerprints, surrogate
-src/output/      reports, A/B audio, preset export (planned)
+src/output/      failure reports, preset files (params.json, state); reports and .vstpreset planned
 src/app/         the mimicry command line
 src/tests/       tests and the test synth (CLAP, and VST3 through clap-wrapper)
 docs/            PROJECT_PLAN.md and spec/
