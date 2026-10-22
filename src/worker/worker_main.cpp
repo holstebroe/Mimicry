@@ -39,9 +39,9 @@
 
 #include <cstdlib>
 #else
-#include <csignal>
 #include <unistd.h>
 #endif
+#include <csignal>
 
 namespace {
 
