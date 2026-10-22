@@ -49,7 +49,7 @@ resumed like a cancelled one. `mimicry runs [--json]` lists them.
 **Asking for a cancel** (any of these; the run finishes the batch in flight, then stops cleanly):
 Ctrl-C / SIGTERM / SIGBREAK (a second one ends the process at once), the line `cancel` on stdin (with
 `--events`), the end of stdin with `--cancel-on-eof` (a front end that died), or `mimicry cancel <run dir>`
-(creates `cancel` in the run directory; polled once per render batch and removed by the next resume). Workers ignore
+(creates `cancel` in the run directory; polled once per render batch and removed by the next resume). On macOS the `cancel` file is not noticed (plan OQ17); the other ways work. Workers ignore
 SIGINT, so a Ctrl-C in a terminal reaches only the supervisor.
 
 **What a cancelled run keeps.** Everything a finished run writes (spec 07 §1): `best.params.json`,
