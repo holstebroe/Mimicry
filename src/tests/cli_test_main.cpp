@@ -94,7 +94,7 @@ struct Background {
         while (std::chrono::duration<double>(Clock::now() - t0).count() < seconds) {
             for (const auto& e : read_events(out, false))
                 if (pred(e)) return true;
-            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+            std::this_thread::sleep_for(std::chrono::milliseconds(20));
         }
         return false;
     }
@@ -236,14 +236,14 @@ void test_fit(const fs::path& dir, const std::string& plugin, bool vst3) {
 
 void test_transfer(const fs::path& dir, const std::string& source, const std::string& target, const std::string& tag) {
     const std::string common = std::format("transfer --source \"{}\" --target \"{}\" --out \"{}\" --library-root \"{}\" --profiles \"{}\" --workers 2 --events --max 3 --timeout-min 1 --timeout-factor 0 "
-                                           "--evals 450 --minutes 2 --restarts 1 --progress-s 0.2 --checkpoint-s 1 --seed 5",
+                                           "--evals 1200 --minutes 2 --restarts 1 --progress-s 0.2 --checkpoint-s 1 --seed 5",
                                            source, target, (dir / ("runs-" + tag)).string(), (dir / "lib").string(), (dir / "profiles").string());
     Background bg;
     bg.out = dir / (tag + "1.out");
     bg.err = dir / (tag + "1.err");
     bg.start(common);
     // Cancel in the middle of the second preset: the first is done, the second keeps a checkpoint.
-    const bool second = bg.wait_for([](const json::Value& e) { return e["event"].as_string() == "progress" && e["preset"].as_number() == 2 && e["evals"].as_number() >= 150; }, 300);
+    const bool second = bg.wait_for([](const json::Value& e) { return e["event"].as_string() == "progress" && e["preset"].as_number() == 2 && e["evals"].as_number() >= 20; }, 300);
     check(second, tag + ": the second preset is running (first harvested on demand, then fitted)");
     auto ev = read_events(bg.out, false);
     const std::string run = run_dir_of(ev);
