@@ -103,6 +103,18 @@ struct Background {
     }
 };
 
+// What a failed cancel check needs to be understood from a CI log alone.
+void dump(const fs::path& dir, const std::string& what, const std::string& run, const std::vector<fs::path>& files) {
+    std::fprintf(stderr, "---- %s: run dir '%s'\n", what.c_str(), run.c_str());
+    std::error_code ec;
+    if (!run.empty())
+        for (const auto& e : fs::directory_iterator(run, ec)) std::fprintf(stderr, "  %s\n", e.path().filename().string().c_str());
+    for (const auto& f : files) {
+        const std::string t = read_file(dir / f);
+        std::fprintf(stderr, "---- %s (%zu bytes, tail)\n%s\n", f.string().c_str(), t.size(), t.substr(t.size() > 1500 ? t.size() - 1500 : 0).c_str());
+    }
+}
+
 std::string run_dir_of(const std::vector<json::Value>& ev) {
     for (const auto& e : ev)
         if (e["event"].as_string() == "start") return e["run_dir"].as_string();
@@ -158,6 +170,7 @@ void test_fit(const fs::path& dir, const std::string& plugin, bool vst3) {
     check(run_cli(std::format("cancel \"{}\"", run), dir / "cancel.out", dir / "cancel.err") == 0, "mimicry cancel exits 0");
     bg.join();
     ev = read_events(bg.out);
+    if (bg.rc != 4) dump(dir, "fit cancel", run, {"cancel.out", "cancel.err", "fit1.out", "fit1.err"});
     check(bg.rc == 4, std::format("fit: a cancelled run exits 4, got {}", bg.rc));
     const auto* done = last_event(ev, "done");
     check(done && (*done)["status"].as_string() == "cancelled" && (*done)["resumable"].as_bool(), "fit: the done event says cancelled and resumable");
@@ -251,6 +264,7 @@ void test_transfer(const fs::path& dir, const std::string& source, const std::st
     check(run_cli(std::format("cancel \"{}\"", run), dir / (tag + "-cancel.out"), dir / (tag + "-cancel.err")) == 0, tag + ": cancel");
     bg.join();
     ev = read_events(bg.out);
+    if (bg.rc != 4) dump(dir, tag + " cancel", run, {tag + "-cancel.out", tag + "-cancel.err", tag + "1.err"});
     check(bg.rc == 4, std::format("{}: cancelled transfer exits 4, got {}", tag, bg.rc));
     const fs::path rd = run;
     auto bank = read_json(rd / "bank.json");
