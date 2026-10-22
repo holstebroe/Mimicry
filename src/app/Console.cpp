@@ -129,9 +129,7 @@ bool Console::cancel_requested() {
     if (cancel_) return true;
     std::lock_guard lock(file_mutex_);
     if (cancel_files_.empty()) return false;
-    const auto now = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
-    if (now - last_file_check_ms_ < 250) return false;
-    last_file_check_ms_ = now;
+    // One stat per call: the callers poll once per render batch, which costs far more.
     std::error_code ec;
     for (const auto& f : cancel_files_)
         if (std::filesystem::exists(f, ec)) cancel_ = true;

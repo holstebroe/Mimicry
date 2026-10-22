@@ -35,7 +35,7 @@ public:
     void install_signal_handlers();
     // Reads stdin on a thread: "cancel" requests a cancel; with `cancel_on_eof`, so does the end of input.
     void start_stdin_watcher(bool cancel_on_eof);
-    // A `cancel` file in a run directory requests a cancel while it exists (polled, at most every 250 ms).
+    // A `cancel` file in a run directory requests a cancel while it exists (polled once per render batch).
     // Several files can be watched; any of them counts.
     void watch_cancel_file(std::filesystem::path path);
 
@@ -49,7 +49,6 @@ private:
     std::atomic<bool> cancel_{false};
     std::mutex file_mutex_;
     std::vector<std::filesystem::path> cancel_files_;
-    long long last_file_check_ms_ = 0;
 };
 
 }  // namespace mimicry::app
