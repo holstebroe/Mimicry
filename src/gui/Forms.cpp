@@ -193,6 +193,21 @@ std::vector<Form> make_forms() {
     return out;
 }
 
+// Reads an environment variable; empty when unset. _dupenv_s avoids the MSVC getenv warning.
+std::string env_value(const char* name) {
+#if defined(_WIN32)
+    char* value = nullptr;
+    std::size_t size = 0;
+    if (_dupenv_s(&value, &size, name) != 0 || !value) return {};
+    std::string out(value);
+    std::free(value);
+    return out;
+#else
+    const char* value = std::getenv(name);
+    return value ? value : "";
+#endif
+}
+
 }  // namespace
 
 const std::vector<Form>& forms() {
@@ -301,10 +316,7 @@ std::vector<std::string> build_resume_args(const Form& form, const std::string& 
 
 std::vector<fs::path> scan_plugins(const std::vector<fs::path>& extra_roots) {
     std::vector<fs::path> roots = extra_roots;
-    auto env = [](const char* n) -> std::string {
-        const char* v = std::getenv(n);
-        return v ? v : "";
-    };
+    auto env = [](const char* n) { return env_value(n); };
 #if defined(_WIN32)
     for (const char* n : {"COMMONPROGRAMFILES", "COMMONPROGRAMFILES(X86)"}) {
         if (env(n).empty()) continue;
@@ -361,10 +373,7 @@ std::vector<fs::path> scan_plugins(const std::vector<fs::path>& extra_roots) {
 }
 
 fs::path Settings::default_path() {
-    auto env = [](const char* n) -> std::string {
-        const char* v = std::getenv(n);
-        return v ? v : "";
-    };
+    auto env = [](const char* n) { return env_value(n); };
 #if defined(_WIN32)
     if (!env("APPDATA").empty()) return fs::path(env("APPDATA")) / "Mimicry" / "gui.json";
 #elif defined(__APPLE__)
