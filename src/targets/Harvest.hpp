@@ -36,6 +36,7 @@ struct HarvestOptions {
     std::optional<opt::HarvestRecipe> recipe;  // from the profile: tried first
     host::Job plan;                            // verification render (notes, rate); coords and state are set here
     double wait_ms = 200;                      // after each load (spec 02 section 7)
+    bool verify_reproducible = false;          // --verify-repro: a second render must match, else not-reproducible [D]
     int max_presets = 0;                       // ok presets to collect, 0 = all
     int abandon_after = 3;                     // a method whose first N presets are all no-change is abandoned [D]
     int stop_after = 8;                        // MIDI program change: N empty slots in a row end the bank [D]
@@ -86,11 +87,12 @@ struct HarvestResult {
 [[nodiscard]] int ladder_rank(host::PresetMethod m) noexcept;
 
 // Classifies presets against the defaults and the ones accepted before (spec 06 section 6): the loaded
-// state must differ from the defaults and from earlier presets, and the state blob alone must reproduce the
-// sound. Used by `harvest` and by `mimicry capture`, which gets its presets from the plugin's own window.
+// state must differ from the defaults and from earlier presets; with `check_reproducible` the state blob alone
+// must also reproduce the sound (off by default: plugins with random modulation never do) [D]. Used by `harvest` and by `mimicry capture`, which gets its presets from the plugin's own window.
 class PresetVerifier {
 public:
-    [[nodiscard]] static expected<PresetVerifier, std::string> create(host::Instance& instance, const host::Job& plan);
+    [[nodiscard]] static expected<PresetVerifier, std::string> create(host::Instance& instance, const host::Job& plan,
+                                                                       bool check_reproducible = false);
     PresetVerifier(PresetVerifier&&) noexcept;
     PresetVerifier& operator=(PresetVerifier&&) noexcept;
     ~PresetVerifier();

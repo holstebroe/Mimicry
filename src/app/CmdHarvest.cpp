@@ -23,6 +23,7 @@ expected<HarvestSummary, std::string> harvest_to_library(host::Instance& inst, c
     for (const auto& f : split(a.get("--from"))) ho.from.emplace_back(f);
     ho.raw_files = a.has("--raw-files");
     ho.all_methods = a.has("--all-methods");
+    ho.verify_reproducible = a.has("--verify-repro");
     if (a.has("--method")) {
         ho.method = host::parse_preset_method(a.get("--method"));
         if (!ho.method) return unexpected("unknown method '" + a.get("--method") + "'");

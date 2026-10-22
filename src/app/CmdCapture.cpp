@@ -44,7 +44,7 @@ int cmd_capture(const Args& a) {
     if (a.has("--note")) key = features::parse_note_name(a.get("--note")).value_or(48);
     host::Job plan = note_job(a, key, 0, 600);
     plan.tail_max_ms = 2000;
-    auto made = targets::PresetVerifier::create(**checker, plan);
+    auto made = targets::PresetVerifier::create(**checker, plan, a.has("--verify-repro"));
     if (!made) return fail("capture", made.error());
     targets::PresetVerifier verifier = std::move(*made);
 
@@ -90,7 +90,7 @@ int cmd_capture(const Args& a) {
     con.info("The plugin's window is open: pick presets (Capture, or Teach click + Auto-capture); Done when finished.");
     if (want_auto && click.is_object()) {
         json::Value o;
-        o.set("max", max_presets > 0 ? max_presets : 200).set("wait_ms", wait_ms);
+        o.set("max", max_presets > 0 ? max_presets : 2000).set("wait_ms", wait_ms);
         (void)(*editor)->editor_action("auto", o);
     }
 

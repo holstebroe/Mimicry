@@ -115,6 +115,7 @@ int main(int argc, char** argv) {
 
     targets::HarvestOptions base;
     base.standard_folders = false;
+    base.verify_reproducible = true;
 
     // The bank, per method: CLAP preset discovery and MIDI program change; VST3 the program list.
     const std::vector<PresetMethod> methods = clap ? std::vector{PresetMethod::ClapPreset, PresetMethod::MidiProgram}

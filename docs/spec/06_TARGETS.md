@@ -218,6 +218,9 @@ Implemented as [D]: the capture window has *Capture*, *Teach click*, *Auto-captu
 status line; `--max N` and Cancel (Ctrl-C / `mimicry cancel`) end the session, `--continue` keeps the captures of
 an earlier session, and each capture is verified by a second worker (`PresetVerifier`, shared with `harvest`).
 Change signals (`take_change_signals`) are collected by the worker but `--watch` is not implemented yet (OQ13).
+The reproducibility check (a second render of the state must match, else `not-reproducible`) is **off by
+default** for `harvest` and `capture` [D: owner, plugins with random modulation never pass]; `--verify-repro`
+turns it on. Auto-capture runs up to 2000 presets [D], then stops like at the end of a bank.
 A captured preset takes the plugin's own name when its state holds one: a string next to a key such as
 `presetName` or `displayName` (JUCE value trees do; `guess_preset_name`) [D]; else `capture-NNN`.
 Edits the plugin's controller makes in its editor are forwarded to the processor before the state is saved.

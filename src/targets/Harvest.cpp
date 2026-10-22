@@ -188,6 +188,7 @@ struct PresetVerifier::Impl {
     Rendered def;
     std::string default_hash;
     double floor = 0, threshold = 0;
+    bool check_reproducible = false;
     struct Kept {
         std::string hash;
         int number = 0;
@@ -215,11 +216,12 @@ PresetVerifier::PresetVerifier(PresetVerifier&&) noexcept = default;
 PresetVerifier& PresetVerifier::operator=(PresetVerifier&&) noexcept = default;
 PresetVerifier::~PresetVerifier() = default;
 
-expected<PresetVerifier, std::string> PresetVerifier::create(host::Instance& inst, const host::Job& job) {
+expected<PresetVerifier, std::string> PresetVerifier::create(host::Instance& inst, const host::Job& job, bool check_reproducible) {
     PresetVerifier v;
     v.impl_ = std::make_unique<Impl>();
     Impl& m = *v.impl_;
     m.inst = &inst;
+    m.check_reproducible = check_reproducible;
     m.plan = job;
     m.plan.state.clear();
     m.plan.coords.clear();
@@ -281,7 +283,10 @@ void PresetVerifier::verify(HarvestEntry& e, host::CapturedPreset& cap) {
                 e.message = "sounds like an earlier preset";
                 break;
             }
-        if (e.duplicate_of == 0) {
+        if (e.duplicate_of == 0 && !m.check_reproducible) {
+            e.outcome = PresetOutcome::Ok;
+            m.pending = r1;
+        } else if (e.duplicate_of == 0) {
             // The blob alone reproduces the sound: a second render after its own reset and load.
             const Rendered r2 = m.render(js);
             const double rep_diff = difference(r1, r2);
@@ -308,7 +313,7 @@ void PresetVerifier::accept(const HarvestEntry& e) {
 
 expected<HarvestResult, std::string> harvest(host::Instance& inst, const HarvestOptions& options) {
     HarvestResult result;
-    auto made = PresetVerifier::create(inst, options.plan);
+    auto made = PresetVerifier::create(inst, options.plan, options.verify_reproducible);
     if (!made) return unexpected(made.error());
     PresetVerifier verifier = std::move(*made);
     const host::Job plan = options.plan;

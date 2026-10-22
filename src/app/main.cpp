@@ -113,7 +113,8 @@ transfer options (fit options apply per preset; --minutes defaults to 5 per pres
 
 capture options (Windows; the plugin's own window, for presets only its browser reaches):
   --auto               replay the taught "next preset" click from the profile until the bank wraps
-  --max N              stop after N ok presets      --wait-ms MS   wait after each click (default 400)
+  --verify-repro       reject presets whose state renders differently twice (off: random modulation is kept)
+  --max N              stop after N ok presets (default: until you press Done / Cancel, at most 2000 in --auto)      --wait-ms MS   wait after each click (default 400)
   --continue           keep the captures of an earlier session   --out DIR / --profiles DIR as for harvest
 
 harvest options:

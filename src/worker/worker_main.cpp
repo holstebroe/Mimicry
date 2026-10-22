@@ -216,7 +216,7 @@ private:
 
     struct AutoRun {
         bool running = false, waiting = false, real_input = false;
-        int max = 200, misses = 0, clicks = 0;
+        int max = 2000, misses = 0, clicks = 0;
         double wait_ms = 400;
         std::chrono::steady_clock::time_point deadline;
     };
@@ -460,7 +460,7 @@ private:
     std::vector<std::string> events_;
     std::optional<worker::ClickRecord> click_;
     bool last_capture_new_ = false;
-    int auto_max_ = 200;
+    int auto_max_ = 2000;
     double auto_wait_ms_ = 400;
     AutoRun auto_;
     struct Teach {
