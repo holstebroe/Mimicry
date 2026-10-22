@@ -139,7 +139,9 @@ FingerprintDb build_fingerprints(const RenderBatch& render, const host::PluginIn
                 ++db.failed;
                 continue;
             }
-            db.coords.emplace_back(jobs[i].coords.begin(), jobs[i].coords.end());
+            const auto& src = jobs[i].coords;
+            auto& row = db.coords.emplace_back(src.size());
+            for (std::size_t k = 0; k < src.size(); ++k) row[k] = static_cast<float>(src[k]);
             db.embeddings.push_back(std::move(emb[i]));
         }
         if (options.progress) options.progress(long(end), long(lhs.size()));

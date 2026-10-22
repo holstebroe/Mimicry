@@ -100,8 +100,8 @@ public:
         return kResultOk;
     }
 
-    tresult PLUGIN_API queryInterface(const TUID iid, void** obj) override {
-        if (FUnknownPrivate::iidEqual(iid, IComponentHandler::iid) || FUnknownPrivate::iidEqual(iid, FUnknown::iid)) {
+    tresult PLUGIN_API queryInterface(const TUID riid, void** obj) override {
+        if (FUnknownPrivate::iidEqual(riid, IComponentHandler::iid) || FUnknownPrivate::iidEqual(riid, FUnknown::iid)) {
             *obj = static_cast<IComponentHandler*>(this);
             return kResultOk;
         }
