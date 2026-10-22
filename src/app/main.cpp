@@ -82,6 +82,7 @@ common options:
   --note C3            target pitch override; --gate MS note length
   --settle-ms MS       silence after the parameters, before the notes (default 250, or the profile's)
   --velocity V         note velocity 1-127 (default 100)
+  --test-delay-ms MS   sleep after every render batch (tests use it to cancel a run on any machine)
   --timeout-min S      watchdog per render: at least S seconds (5) and --timeout-factor F x the audio length (20)
 
 machine-readable output and control (docs/spec/09_GUI.md):

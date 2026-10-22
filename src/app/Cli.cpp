@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cctype>
 #include <cstdio>
+#include <chrono>
 #include <ctime>
 #include <format>
 #include <thread>
@@ -92,11 +93,16 @@ std::vector<std::string> split(const std::string& s) {
 }
 
 opt::RenderBatch Plugin::batch() {
-    if (pool) return [this](const std::vector<host::Job>& jobs) { return pool->render_all(jobs); };
+    if (pool) return [this](const std::vector<host::Job>& jobs) {
+        auto out = pool->render_all(jobs);
+        if (test_delay_ms > 0) std::this_thread::sleep_for(std::chrono::milliseconds(test_delay_ms));
+        return out;
+    };
     return [this](const std::vector<host::Job>& jobs) {
         std::lock_guard lock(local_mutex);
         std::vector<expected<host::Audio, Outcome>> out;
         for (const auto& j : jobs) out.push_back(local->render(j));
+        if (test_delay_ms > 0) std::this_thread::sleep_for(std::chrono::milliseconds(test_delay_ms));
         return out;
     };
 }
@@ -118,6 +124,7 @@ expected<std::unique_ptr<Plugin>, std::string> open_plugin(const std::string& pa
     if (auto f = host::format_from_path(path); !f) return mimicry::unexpected(f.error());
     auto p = std::make_unique<Plugin>();
     p->path = path;
+    p->test_delay_ms = int(args.num("--test-delay-ms", 0));
     if (args.has("--no-isolation")) {
         auto inst = host::open(path);
         if (!inst) return mimicry::unexpected(inst.error().message);

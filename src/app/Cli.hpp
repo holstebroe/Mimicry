@@ -45,6 +45,7 @@ struct Plugin {
     host::PluginInfo info;
     std::vector<host::ParamDesc> params;
     std::string path;
+    int test_delay_ms = 0;  // --test-delay-ms: sleep after every render batch, so tests can cancel a run on any machine
 
     [[nodiscard]] opt::RenderBatch batch();
     [[nodiscard]] int workers() const { return pool ? pool->size() : 1; }

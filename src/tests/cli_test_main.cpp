@@ -142,7 +142,7 @@ void probe(const fs::path& dir, const std::string& plugin) {
 void test_fit(const fs::path& dir, const std::string& plugin, bool vst3) {
     const fs::path wav = dir / "target.wav";
     write_target(wav);
-    const std::string common = std::format("--plugin \"{}\" --wav \"{}\" --out \"{}\" --profiles \"{}\" --workers 2 --events --seed 3 --timeout-min 1 --timeout-factor 0", plugin,
+    const std::string common = std::format("--plugin \"{}\" --wav \"{}\" --out \"{}\" --profiles \"{}\" --workers 2 --events --seed 3 --timeout-min 1 --timeout-factor 0 --test-delay-ms 250", plugin,
                                            wav.string(), (dir / "runs").string(), (dir / "profiles").string());
     probe(dir, plugin);
     Background bg;
@@ -235,8 +235,8 @@ void test_fit(const fs::path& dir, const std::string& plugin, bool vst3) {
 }
 
 void test_transfer(const fs::path& dir, const std::string& source, const std::string& target, const std::string& tag) {
-    const std::string common = std::format("transfer --source \"{}\" --target \"{}\" --out \"{}\" --library-root \"{}\" --profiles \"{}\" --workers 2 --events --max 3 --timeout-min 1 --timeout-factor 0 "
-                                           "--evals 1200 --minutes 2 --restarts 1 --progress-s 0.2 --checkpoint-s 1 --seed 5",
+    const std::string common = std::format("transfer --source \"{}\" --target \"{}\" --out \"{}\" --library-root \"{}\" --profiles \"{}\" --workers 2 --events --max 3 --timeout-min 1 --timeout-factor 0 --test-delay-ms 300 "
+                                           "--evals 450 --minutes 2 --restarts 1 --progress-s 0.2 --checkpoint-s 1 --seed 5",
                                            source, target, (dir / ("runs-" + tag)).string(), (dir / "lib").string(), (dir / "profiles").string());
     Background bg;
     bg.out = dir / (tag + "1.out");
