@@ -38,5 +38,6 @@ jobs:
           build/mimicry_test_synth.clap
           build/Release/mimicry.exe
           build/Release/mimicry_worker.exe
+          build/Release/mimicry_gui.exe
           build/Release/mimicry_test_synth.clap
         if-no-files-found: ignore

@@ -140,6 +140,55 @@ int main(int argc, char** argv) {
               "a recipe's method goes first (program parameter: programs 1-3 ok)");
     }
 
+    // Cancel in the middle of a method, write the library, continue from it (spec 09 section 3): the numbers
+    // and the outcomes equal those of an uninterrupted harvest, and nothing is tried twice.
+    if (first) {
+        auto o = base;
+        o.method = methods.front();
+        int seen = 0;
+        o.progress = [&](const targets::HarvestEntry&) { ++seen; };
+        o.cancel = [&] { return seen >= 3; };
+        auto part = targets::harvest(inst, o);
+        check(part && part->cancelled && part->entries.size() == 3 && part->methods.front().note == "cancelled", "harvest: cancelled after three presets");
+        if (part) {
+            const fs::path root = dir / "cancelled";
+            auto lib = targets::write_library(root, *part, inst.info(), inst.parameters(), [&](std::uint32_t id, double u) { return inst.value_text(id, u); });
+            check(lib.has_value(), "harvest: the partial library is written");
+            auto index = lib ? json::parse(read_file(*lib / "index.json")) : expected<json::Value, std::string>(unexpected(std::string("no library")));
+            check(index && (*index)["cancelled"].as_bool(), "harvest: index.json says cancelled");
+            auto prior = lib ? targets::load_library(*lib) : expected<std::vector<targets::HarvestEntry>, std::string>(unexpected(std::string("no library")));
+            check(prior && prior->size() == 3, "harvest: the library reads back");
+            if (prior) {
+                auto c = base;
+                c.method = methods.front();
+                c.prior = *prior;
+                int tried_again = 0;
+                c.progress = [&](const targets::HarvestEntry&) { ++tried_again; };
+                auto rest = targets::harvest(inst, c);
+                check(rest && !rest->cancelled && rest->entries.size() == first->entries.size() && rest->ok_count() == first->ok_count(),
+                      std::format("harvest: the continued harvest has the full bank ({} entries, {} ok)", rest ? rest->entries.size() : 0, rest ? rest->ok_count() : 0));
+                check(tried_again == int(first->entries.size()) - 3, "harvest: only the presets not yet tried are loaded");
+                if (rest) {
+                    bool same = rest->entries.size() == first->entries.size();
+                    for (std::size_t i = 0; same && i < rest->entries.size(); ++i)
+                        same = rest->entries[i].outcome == first->entries[i].outcome && rest->entries[i].number == first->entries[i].number &&
+                               rest->entries[i].state_hash == first->entries[i].state_hash;
+                    check(same, "harvest: outcomes, numbers and states equal an uninterrupted harvest");
+                    check(rest->methods.front().resumed == 3 && rest->recipe && rest->recipe->method == methods.front(), "harvest: the report counts the taken-over presets, the recipe is kept");
+                    auto lib2 = targets::write_library(root, *rest, inst.info(), inst.parameters(), [&](std::uint32_t id, double u) { return inst.value_text(id, u); });
+                    check(lib2.has_value(), "harvest: the completed library is written over the partial one");
+                    if (lib2) {
+                        int states = 0;
+                        for (const auto& e : fs::directory_iterator(*lib2)) states += e.path().extension() == ".state";
+                        check(states == rest->ok_count(), std::format("harvest: one state file per ok preset after the continue ({})", states));
+                        auto again = targets::load_library(*lib2);
+                        check(again && again->size() == first->entries.size(), "harvest: the completed library reads back whole");
+                    }
+                }
+            }
+        }
+    }
+
     // The library on disk, and its states read back as file presets (ladder step 1).
     if (first) {
         auto lib = targets::write_library(dir / "presets", *first, inst.info(), inst.parameters(),

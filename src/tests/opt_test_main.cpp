@@ -792,6 +792,75 @@ void test_pipeline() {
     check(sr.surrogate_used && sr.best.eval.loss < 3.0, "pipeline: surrogate pre-screening runs (loss " + std::to_string(sr.best.eval.loss) + ")");
 }
 
+// Cancel and resume (spec 04 section 10): a cancelled run keeps its best point and a checkpoint; resuming
+// skips the stages that finished, never loses ground, counts evaluations and time across sessions and
+// reaches the optimum an uninterrupted run reaches.
+void test_cancel_resume() {
+    auto ps = synthetic_params();
+    ps.resize(9);
+    ps.erase(ps.begin() + 8);
+    std::vector<double> target{0.95, 0.4, 0.2, 0.6, 0.3, 0.1, 0.75, 2.0 / 3.0};
+    auto space = Space::build(ps, host::PluginFormat::Clap, nullptr, SpaceOptions{});
+    Synthetic first(target, 7, 2.0 / 3.0);
+    PipelineOptions po;
+    po.max_evals = 6000;
+    po.time_cap_s = 60;
+    po.seed_samples = 200;
+    po.prior = false;
+    po.seed = 11;
+    int checkpoints = 0;
+    po.cancel = [&] { return first.calls >= 1500; };
+    po.checkpoint = [&](const PipelineState&) { ++checkpoints; };
+    po.checkpoint_interval_s = 1e9;
+    const auto a = run_pipeline(first, space, po);
+    check(a.cancelled && !a.aborted, "cancel: the run reports it was cancelled");
+    check(a.best.eval.ok() && std::isfinite(a.best.eval.loss), "cancel: the best point so far is kept");
+    check(a.evals >= 1500 && a.evals < 1500 + 200, "cancel: stops within a batch (" + std::to_string(a.evals) + ")");
+    check(checkpoints >= 2 && a.state.evals == a.evals, "cancel: checkpoints written at stage ends and at the cancel");
+    check(!a.state.is_done(5) && !a.state.is_done(7), "cancel: unfinished stages are not marked done");
+    check(a.state.is_done(1), "cancel: finished stages are marked done");
+
+    // Through the file, as the CLI does it.
+    const auto path = std::filesystem::temp_directory_path() / "mimicry_checkpoint_test.json";
+    check(a.state.save(path).has_value(), "checkpoint: save");
+    auto back = PipelineState::load(path);
+    std::filesystem::remove(path);
+    check(back && back->to_json() == a.state.to_json(), "checkpoint: JSON round trip");
+    if (!back) return;
+
+    Synthetic second(target, 7, 2.0 / 3.0);
+    PipelineOptions ro = po;
+    ro.cancel = nullptr;
+    ro.checkpoint = nullptr;
+    ro.resume = &*back;
+    std::vector<std::string> log;
+    ro.log = [&](const std::string& s) { log.push_back(s); };
+    const auto b = run_pipeline(second, space, ro);
+    check(!b.cancelled && b.best.eval.loss <= a.best.eval.loss + 1e-9,
+          "resume: never loses ground (" + std::to_string(a.best.eval.loss) + " -> " + std::to_string(b.best.eval.loss) + ")");
+    check(b.best.eval.loss < 0.2, "resume: reaches the optimum (" + std::to_string(b.best.eval.loss) + ")");
+    check(b.evals > a.evals && b.evals <= ro.max_evals + 64, "resume: evaluations count across sessions (" + std::to_string(b.evals) + ")");
+    check(second.calls < b.evals - a.evals + 100, "resume: only the new evaluations plus the re-scored points are rendered");
+    check(b.seconds >= a.seconds && b.state.sessions == 2, "resume: time and session count carry over");
+    bool reran_s1 = false;
+    for (const auto& l : log) reran_s1 = reran_s1 || l.rfind("S1 seed", 0) == 0;
+    check(!reran_s1, "resume: the finished S1 stage is skipped");
+    check(!b.top_k.empty() && b.stages.size() > a.stages.size(), "resume: stage reports continue and the top-K set is selected");
+    long counted = 0;
+    for (const auto& [o, n] : b.outcomes) counted += n;
+    check(counted == b.evals, "resume: outcome counts carry over");
+
+    // An exhausted time cap stops a resumed run at once and keeps the checkpoint's best.
+    PipelineOptions to = po;
+    to.cancel = nullptr;
+    to.checkpoint = nullptr;
+    to.resume = &*back;
+    to.time_cap_s = back->elapsed_s;
+    Synthetic third(target, 7, 2.0 / 3.0);
+    const auto c = run_pipeline(third, space, to);
+    check(c.time_capped && c.evals < a.evals + 30, "resume: a spent time cap ends the run");
+}
+
 }  // namespace
 
 int main() {
@@ -807,6 +876,7 @@ int main() {
     test_constraints();
     test_pitch_calibration();
     test_pipeline();
+    test_cancel_resume();
     if (failures) {
         std::fprintf(stderr, "%d failure(s)\n", failures);
         return 1;

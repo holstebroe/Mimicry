@@ -28,6 +28,7 @@ Optimizer techniques come from Acidus (`tools/calibrate_reference.py`, `tools/fi
 | `spec/06_TARGETS.md` | WAV, plugin-to-plugin (cross-format), image, effects |
 | `spec/07_OUTPUT_VALIDATION.md` | Run output, `.vstpreset` export, generalisation checks, tests T1-T20, test synth |
 | `spec/08_DIAGNOSIS.md` | `mimicry doctor`: measurements per plugin and per parameter, effect views, HTML report |
+| `spec/09_GUI.md` | Machine-readable output (`--events`), cancel and resume, the Windows front end, tests T21-T22 |
 
 ## Use cases
 
@@ -109,9 +110,9 @@ build/mimicry fit --plugin path/to/plugin.vst3 --wav target.wav --minutes 20
 ### WP5 — Targets (spec 06)
 | ID | Issue | Status |
 | --- | --- | --- |
-| 5.1 | WAV target analysis and `mimicry fit` | 🟡 `mimicry fit` runs end to end (analysis, pitch to the note, profile, fingerprints, pipeline, run directory). Open: `--midi`, `--gate` defaults from the envelope, `--velocity` |
+| 5.1 | WAV target analysis and `mimicry fit` | 🟡 `mimicry fit` runs end to end (analysis, pitch to the note, profile, fingerprints, pipeline, run directory); the gate defaults to the target's measured length, `--velocity` added (WP6.8 session). Open: `--midi` (multi-note targets) |
 | 5.2 | Probe plans, source rendering and cache | ⬜ |
-| 5.3 | `mimicry transfer` for one preset, then the bank loop and report, in any format combination | ⬜ |
+| 5.3 | `mimicry transfer` for one preset, then the bank loop and report, in any format combination | 🟡 first version (`app/CmdTransfer`, spec 06 §2): the source's harvest library (harvested on demand), one note plan, a fit per preset in the target, `bank.json` / `bank-report.csv`, cancel and resume per preset and inside a preset, CLAP→CLAP, VST3→VST3 and CLAP→VST3 tested (`cli_*`). Open: the probe plan (5.2), holdout, warm start from a close preset, effects (5.7), ranking several targets (5.11) |
 | 5.4a | **Map without fitting** (`mimicry map --source A --target B`, spec 04 §8): match parameters by role, units and probe signature; exact laws where both value texts carry a unit (cutoff in Hz); many-to-one and one-to-many links; `knob_map.json` with a confidence per entry | ⬜ |
 | 5.4b | Learned mapping from solved transfers (>= 50 pairs) refines 5.4a; keyed by source and target format + uid | ⬜ |
 | 5.5 | Image Route A (descriptors) and `image_map.json` | ⬜ |
@@ -130,18 +131,20 @@ build/mimicry fit --plugin path/to/plugin.vst3 --wav target.wav --minutes 20
 ### WP6 — Output and tests (spec 07)
 | ID | Issue | Status |
 | --- | --- | --- |
-| 6.1 | `best.state`, `best.params.json`, `match.wav`, `ab.wav`, `report.md`, `diff.ppm` | 🟡 `fit` writes `best.params.json`, `best.state`, `match.wav`, `ab.wav`, `result.json`, `top-k/`; `report.md`, `diff.ppm` and `.vstpreset` open |
-| 6.2 | Holdout and `mimicry eval` | ⬜ |
-| 6.3 | Tests T1-T12 | 🟡 smoke, core, host (T1 T2 T3 T9 partly), worker (T1 via worker, T7, T9), T13 equivalence, T5 (`opt`), optimizer against the test synth in both formats (`fit_clap`, `fit_vst3`, a small T6) |
+| 6.1 | `best.state`, `best.params.json`, `match.wav`, `ab.wav`, `report.md`, `diff.ppm` | ✅ `fit` and every transfer preset write them all, also when cancelled, plus `best.vstpreset` (VST3), `diff.bmp` (the same image for Windows viewers), `result.json`, `run.json`, `crashes/`, `top-k/`; `report.md` has stages, features, parameters at a bound, outcomes and hazards (spec 07 §1) |
+| 6.2 | Holdout and `mimicry eval` | 🟡 `mimicry eval --plugin P --state S --wav T.wav` scores a `best.state` or `.vstpreset` (gain solved, per-feature losses, `--json`). Open: the holdout notes and the overfit warning |
+| 6.3 | Tests T1-T12 | 🟡 smoke, core, host (T1 T2 T3 T9 partly), worker (T1 via worker, T7, T9), T13 equivalence, T5 (`opt`), optimizer against the test synth in both formats (`fit_clap`, `fit_vst3`, a small T6), T10 (`output`, `cli_*`: `diff.ppm`/`diff.bmp`, `ab.wav`, `report.md` after a cancel). Open: T4 per new feature, T11, T12 |
 | 6.4 | `mimicry rehearse` round trip | ⬜ |
-| 6.5 | `.vstpreset` writer and round-trip test (T14) | ⬜ |
-| 6.6 | Backend equivalence, cross-format transfer, VST3 specifics (T13, T15, T16) | 🟡 T13 and T16 done (both formats); T15 open (needs transfer, 5.3) |
-| 6.7 | Harvest, effect, map and doctor tests (T17-T20); test synth factory presets exposed through CLAP preset discovery and a VST3 program list | 🟡 factory bank (six presets with a no-op and a duplicate) through CLAP preset discovery + preset-load, a CLAP file location, MIDI program change and clap-wrapper's VST3 program list; T17 in `host_*` and `harvest_*`. T18-T20 open |
+| 6.5 | `.vstpreset` writer and round-trip test (T14) | ✅ `output/VstPreset` (writer, reader, state-blob conversion); layout and round trip in `output`, a VST3 fit's `best.vstpreset` loaded through the host reader (`mimicry eval --state`) renders like `best.state` (`cli_vst3`). The SDK validator is not run (not in the hosting sources) |
+| 6.6 | Backend equivalence, cross-format transfer, VST3 specifics (T13, T15, T16) | 🟡 T13 and T16 done (both formats); T15 open (needs the Acidus plugins); the test synth CLAP→VST3 transfer runs in `cli_clap_to_vst3` |
+| 6.7 | Harvest, effect, map and doctor tests (T17-T20); test synth factory presets exposed through CLAP preset discovery and a VST3 program list | 🟡 factory bank (six presets with a no-op and a duplicate) through CLAP preset discovery + preset-load, a CLAP file location, MIDI program change and clap-wrapper's VST3 program list; T17 in `host_*` and `harvest_*` (also cancel and `--continue`). T18-T20 open |
+| 6.8 | **Cancel, checkpoint, resume** (spec 04 §10, 09 §3): `PipelineOptions::cancel` / `checkpoint` / `resume`, `opt/Checkpoint`; run directories with `run.json`; `fit --resume`, `transfer --resume`, `harvest --continue`; Ctrl-C, `mimicry cancel`, stdin `cancel`; `mimicry runs` | ✅ T21 in `opt` and `cli_*`, `harvest_*`. Not stored: CMA-ES internals (an interrupted stage restarts from the best point) |
+| 6.9 | **Machine-readable output** (`--events`, spec 09 §2): JSON lines for start, phase, progress, stage, preset, bank, log, done; exit code 4 for a cancelled run; `eval --json`, `runs --json`; the worker ignores SIGINT; `--timeout-min` / `--timeout-factor` for the worker watchdog | ✅ `cli_*`, `gui_e2e_*` |
 
 ### WP7 — Later
 | ID | Issue | Status |
 | --- | --- | --- |
-| 7.1 | Software-rendered GUI (spectrogram A/B, progress, parameter table), glue from Acidus | ⬜ |
+| 7.1 | Front end: **Windows program** `mimicry_gui` (Win32, no framework; spec 09): a form per command, monitor (progress, ETA, loss curve, stage / preset / bank tables, log), cancel and resume, run list, drag and drop, plugin scan, remembered settings. The portable logic (`gui/ChildProcess`, `Forms`, `RunModel`) is tested on all platforms (T22) | 🟡 compiles and links with MinGW and is built in the Windows CI job; **not yet run on a Windows machine** (OQ16). Open: a parameter table of the best preset, an inline spectrogram, a Harvest "capture" tab (5.9) |
 | 7.2 | Mimicry Capture plugin (CLAP + VST3 via clap-wrapper) | ⬜ |
 | 7.3 | Stereo features | ⬜ |
 | 7.4 | Further backends (AU, LV2) if wanted; VST2 is out of scope | ⬜ |
@@ -183,6 +186,7 @@ built and tested against both formats from the start.
 | OQ12 | Resolved: plugin editors (capture, taught click) are **Windows only**, Win32 API, no new dependency. Linux and macOS have the automatic harvest only. Open detail: the editor code cannot be tried interactively in CI, so it needs a manual check on a Windows machine | 🔬 |
 | OQ13 | Preset change detection in watch mode: how reliable are CLAP `preset-load.loaded` from the plugin's own browser, a VST3 program-change parameter edit, a burst of parameter changes (CLAP output events / rescan, VST3 `performEdit` or `restartComponent(kParamValuesChanged)`) and a changed state hash as signals? Plugins with hidden state (wavetables, samples) may change state without parameter events. Measure on real plugins | 🔬 |
 | OQ14 | Resolved: names come from the formats where they exist (CLAP discovery metadata, matched to `preset-load.loaded` in capture; VST3 `IUnitInfo::getProgramName` and the program-change parameter's value text; preset file names), else a default `capture-NNN` the user may rename. No screen reading. Open detail: how many plugins call `preset-load.loaded` for loads from their own browser (the CLAP spec does not require it) | 🔬 |
+| OQ16 | The Windows front end has been compiled but never run: visual styles (the manifest is a linker pragma, MSVC only), layout at 125 % / 150 % scaling, tab order, the long-running behaviour of the 250 ms timer, closing during a run, drag and drop onto a window run as administrator. Non-ASCII names: the command line is ANSI end to end, so names outside the code page do not survive (resume, open folder). A manual pass on a Windows machine, see spec 09 §6 | 🔬 |
 | OQ15 | Which effect probe signals are enough to identify typical effects (EQ, filter, compressor, distortion, chorus/phaser, delay, reverb) without making every candidate render slow; tune the default effect plan on real plugins | 🔬 |
 | OQ10 | Resolved: baseline lowered to C++20 with an `expected` shim (see decision log); builds on GCC 13, MSVC and AppleClang in CI (MSVC needed `mimicry::unexpected` qualified next to its own `::unexpected`) | ✅ |
 
@@ -199,9 +203,11 @@ built and tested against both formats from the start.
 | 2026-10-19 | The worker may open the plugin's editor for manual capture only (`capture`); fit, probe and transfer stay windowless. Editors run in `mimicry_worker` like every other plugin call (rule 4) |
 | 2026-10-19 | Editor hosting, manual capture and the taught "next preset" click are **Windows only** (OQ12, owner); no X11 or Cocoa code. Preset names come from the formats or default to `capture-NNN` (OQ14). Preset folders are a harvest step: CLAP discovery locations, standard VST3 preset folders, user folders |
 | 2026-10-19 | Effects are first-class: audio input in `Job`, a built-in probe signal set generated in code, effect-to-effect transfer. Parameter roles (cutoff, attack, ...) sit below the groups and drive the map and the doctor report. `mimicry doctor` (spec 08) added as Goal 4 |
+| 2026-10-21 | **The command line is the product; the Windows front end is a client of it.** `mimicry_gui` runs `mimicry --events --cancel-on-eof` as a child process (JSON lines out, `cancel` in) and loads no plugin, so an agent drives exactly what the window drives. A run can always be cancelled and resumed: a checkpoint per run, an interrupted stage restarts from the best point (CMA-ES state is not stored). Exit code 4 is a resumable cancelled run. Harvest resumes through its library (`--continue`), not a run directory. Forms are data (`gui/Forms`), so a new option is one table line and the command line stays the reference |
 
 ## Progress log
 
+- 2026-10-21: **Cancel/resume, machine-readable output and the Windows front end** (WP6.1/6.2/6.5, 6.8, 6.9, 7.1, 5.3 first version). Optimizer: `PipelineOptions::cancel` / `checkpoint` / `resume`, `opt/Checkpoint` (finished stages, best point, S1 points, finalists, time, evaluations, outcomes); an interrupted stage restarts from the best point, finished ones are skipped, time cap and budgets count the whole run. App: `Console` (JSON-lines `--events`, SIGINT/SIGTERM/SIGBREAK, stdin `cancel`, `--cancel-on-eof`, `cancel` file), `RunDir` (`run.json`, atomic), `FitRun` (one fit with results also on a cancel: `report.md`, `diff.ppm` + `diff.bmp`, `best.vstpreset`, parameters at a bound), `fit --resume`, `transfer` (first version), `harvest --continue`, `eval`, `runs`, `cancel`, `--velocity`, worker watchdog options. Output: `.vstpreset` writer/reader, PPM/BMP spectrogram comparison. Front end: `gui/ChildProcess`, `Forms` (forms as data), `RunModel`, and `gui/win` (Win32 window, loss graph, tables, log). Found on the way: a thread blocked in `std::cin` kept the process from exiting while the front end held the pipe open (raw reads now); a fit without a profile spends minutes in watchdog timeouts on the test synth's planted hangs (tests probe first and use `--timeout-min 1`); a Ctrl-C in a terminal reached the workers too (they ignore SIGINT now). Tests: T21 (`opt`, `cli_clap`, `cli_vst3`, `cli_clap_to_vst3`, `harvest_*`), T22 (`gui_core`, `gui_e2e_clap`), `output`. Spec 09 added; 01, 04 §10, 06, 07 updated. The Win32 code is compiled (MinGW, `-Wall -Wextra` clean) but not run: OQ16.
 - 2026-10-21: WP5 started with the automatic preset harvest (5.8a, 5.8, 5.10). Host: `PresetRef`,
   `CapturedPreset`, `Instance::presets()` / `apply_preset()` and `Job.state` (spec 02 §1, §7); CLAP preset
   discovery + preset-load + MIDI program change, VST3 program lists + program data + `.vstpreset` reading,

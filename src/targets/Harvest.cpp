@@ -6,6 +6,8 @@
 #include <cstdlib>
 #include <format>
 #include <fstream>
+#include <map>
+#include <set>
 #include <sstream>
 
 #include "host/Codec.hpp"
@@ -108,6 +110,19 @@ void add_folder(const fs::path& dir, bool any, const std::vector<std::string>& e
     }
 }
 
+// Identity of a preset as the plugin offers it, for "already tried" in a resumed harvest.
+std::string ref_key(const host::PresetRef& r) {
+    return std::format("{}|{}|{}|{}|{}|{}|{}|{}|{}", host::to_string(r.method), r.location, r.load_key, r.list_id, r.param_id,
+                       r.index, r.bank, r.name, r.count);
+}
+
+PresetOutcome parse_outcome_name(std::string_view t) {
+    for (const auto o : {PresetOutcome::Ok, PresetOutcome::NoChange, PresetOutcome::Duplicate, PresetOutcome::NotReproducible,
+                         PresetOutcome::LoadError, PresetOutcome::Timeout})
+        if (to_string(o) == t) return o;
+    return PresetOutcome::LoadError;
+}
+
 struct Rendered {
     bool ok = false;
     std::string why;
@@ -197,9 +212,36 @@ expected<HarvestResult, std::string> harvest(host::Instance& inst, const Harvest
     std::vector<std::size_t> ok_index;  // entries that are ok, with their renders
     std::vector<Rendered> ok_render;
     int ok_total = 0;
+    // A resumed harvest: the earlier session's presets are taken over (ok ones re-rendered once, for the
+    // duplicate check) and never loaded again.
+    std::set<std::string> tried;
+    std::map<PresetMethod, MethodReport> before;
+    std::map<PresetMethod, host::PresetRef> before_first_ok;
+    for (const auto& pe : options.prior) {
+        HarvestEntry e = pe;
+        tried.insert(ref_key(e.ref));
+        auto& mr = before[e.ref.method];
+        mr.method = e.ref.method;
+        ++mr.tried;
+        ++mr.resumed;
+        if (e.outcome == PresetOutcome::Ok) {
+            host::Job js = plan;
+            js.coords.clear();
+            js.state = e.captured.state;
+            const Rendered r = render(js);
+            if (!r.ok) continue;  // the earlier state no longer renders: dropped, and the preset is not tried again
+            ++mr.ok;
+            if (!before_first_ok.count(e.ref.method)) before_first_ok[e.ref.method] = e.ref;
+            ok_index.push_back(result.entries.size());
+            ok_render.push_back(r);
+            ok_total = std::max(ok_total, e.number);
+        }
+        result.entries.push_back(std::move(e));
+    }
     for (const PresetMethod method : order) {
         if (options.method && method != *options.method) continue;
         if (options.max_presets > 0 && ok_total >= options.max_presets) break;
+        if (result.cancelled) break;
         const bool from_recipe = options.recipe && options.recipe->method == method;
         MethodReport rep;
         rep.method = method;
@@ -211,8 +253,20 @@ expected<HarvestResult, std::string> harvest(host::Instance& inst, const Harvest
             std::ranges::stable_partition(mine, [&](const host::PresetRef& r) { return r.param_id == options.recipe->param_id; });
         std::optional<host::PresetRef> first_ok;  // the ref the recipe names
         rep.offered = static_cast<int>(mine.size());
+        if (const auto it = before.find(method); it != before.end()) {
+            rep.tried = it->second.tried;
+            rep.ok = it->second.ok;
+            rep.resumed = it->second.resumed;
+            if (const auto f = before_first_ok.find(method); f != before_first_ok.end()) first_ok = f->second;
+        }
         int empty_run = 0;
         for (const auto& ref : mine) {
+            if (tried.count(ref_key(ref))) continue;  // done by an earlier session
+            if (options.cancel && options.cancel()) {
+                result.cancelled = true;
+                rep.note = "cancelled";
+                break;
+            }
             if (options.max_presets > 0 && ok_total >= options.max_presets) {
                 rep.note = std::format("stopped at --max {}", options.max_presets);
                 break;
@@ -220,6 +274,8 @@ expected<HarvestResult, std::string> harvest(host::Instance& inst, const Harvest
             HarvestEntry e;
             e.ref = ref;
             ++rep.tried;
+            e.position = rep.tried;
+            e.of = rep.offered;
             auto cap = inst.apply_preset(ref, options.wait_ms);
             if (!cap) {
                 e.message = cap.error().message;
@@ -296,7 +352,7 @@ expected<HarvestResult, std::string> harvest(host::Instance& inst, const Harvest
             }
         }
         result.methods.push_back(rep);
-        if (rep.ok > 0 && !result.recipe) {
+        if (rep.ok > 0 && !result.recipe && first_ok) {
             opt::HarvestRecipe recipe;
             recipe.method = method;
             recipe.count = rep.offered;
@@ -306,6 +362,7 @@ expected<HarvestResult, std::string> harvest(host::Instance& inst, const Harvest
             recipe.list_id = first_ok->list_id;
             result.recipe = recipe;
         }
+        if (result.cancelled) break;
         if (rep.ok > 0 && !options.all_methods && !options.method) break;  // each step runs until it yields presets
     }
     return result;
@@ -338,6 +395,12 @@ expected<fs::path, std::string> write_library(const fs::path& root, const Harves
     fs::create_directories(dir, ec);
     if (ec) return unexpected("cannot create " + dir.string());
     // A re-harvest replaces the library: the files the previous index listed go, nothing else in the folder.
+    // Entries taken over from a resumed harvest keep theirs.
+    std::set<std::string> keep;
+    for (const auto& e : result.entries) {
+        if (!e.state_file.empty()) keep.insert(e.state_file);
+        if (!e.params_file.empty()) keep.insert(e.params_file);
+    }
     if (std::ifstream old(dir / "index.json", std::ios::binary); old) {
         std::stringstream ss;
         ss << old.rdbuf();
@@ -345,7 +408,7 @@ expected<fs::path, std::string> write_library(const fs::path& root, const Harves
             for (const auto& e : (*v)["presets"].as_array())
                 for (const char* key : {"state", "params"}) {
                     const std::string name = e[key].as_string();
-                    if (!name.empty() && fs::path(name).filename() == fs::path(name)) fs::remove(dir / name, ec);
+                    if (!name.empty() && !keep.count(name) && fs::path(name).filename() == fs::path(name)) fs::remove(dir / name, ec);
                 }
     }
 
@@ -357,7 +420,9 @@ expected<fs::path, std::string> write_library(const fs::path& root, const Harves
             .set("ref", host::to_json(e.ref)).set("outcome", std::string(to_string(e.outcome))).set("message", e.message)
             .set("state_hash", e.state_hash).set("duplicate_of", e.duplicate_of).set("difference", e.difference)
             .set("params_reproduce", e.params_reproduce);
-        if (e.outcome == PresetOutcome::Ok) {
+        if (e.outcome == PresetOutcome::Ok && !e.state_file.empty()) {
+            v.set("state", e.state_file).set("params", e.params_file);  // written by an earlier session
+        } else if (e.outcome == PresetOutcome::Ok) {
             const std::string stem = std::format("{:03}-{}", e.number, file_safe(e.name));
             if (auto w = output::write_bytes(dir / (stem + ".state"), e.captured.state); !w) return unexpected(w.error());
             auto pj = output::params_json(info, params, e.captured.coords, text);
@@ -377,7 +442,9 @@ expected<fs::path, std::string> write_library(const fs::path& root, const Harves
             .set("note", m.note);
         methods.push_back(std::move(v));
     }
+    if (result.cancelled) report += "# cancelled: continue with --continue\n";
     json::Value index;
+    index.set("cancelled", result.cancelled);
     index.set("format", std::string(host::to_string(info.format))).set("plugin", info.name).set("vendor", info.vendor)
         .set("uid", info.uid).set("version_hash", info.version_hash).set("floor", result.floor).set("threshold", result.threshold)
         .set("methods", std::move(methods)).set("presets", std::move(presets));
@@ -386,6 +453,45 @@ expected<fs::path, std::string> write_library(const fs::path& root, const Harves
     if (auto w = output::write_text(dir / "index.json", index.dump(2) + "\n"); !w) return unexpected(w.error());
     if (auto w = output::write_text(dir / "harvest-report.csv", report); !w) return unexpected(w.error());
     return dir;
+}
+
+}  // namespace mimicry::targets
+
+namespace mimicry::targets {
+
+expected<std::vector<HarvestEntry>, std::string> load_library(const fs::path& dir) {
+    std::ifstream f(dir / "index.json", std::ios::binary);
+    if (!f) return unexpected("no library at " + dir.string());
+    std::stringstream ss;
+    ss << f.rdbuf();
+    auto v = json::parse(ss.str());
+    if (!v) return unexpected((dir / "index.json").string() + ": " + v.error());
+    std::vector<HarvestEntry> out;
+    for (const auto& p : (*v)["presets"].as_array()) {
+        HarvestEntry e;
+        e.number = int(p["number"].as_number());
+        e.name = p["name"].as_string();
+        if (auto ref = host::preset_from_json(p["ref"])) e.ref = *ref;
+        else continue;  // an entry without a usable reference cannot be skipped later; it is tried again
+        e.outcome = parse_outcome_name(p["outcome"].as_string());
+        e.message = p["message"].as_string();
+        e.state_hash = p["state_hash"].as_string();
+        e.duplicate_of = int(p["duplicate_of"].as_number());
+        e.difference = p["difference"].as_number();
+        e.params_reproduce = p["params_reproduce"].as_bool();
+        if (e.outcome == PresetOutcome::Ok) {
+            const std::string sf = p["state"].as_string();
+            if (sf.empty() || fs::path(sf).filename() != fs::path(sf)) continue;
+            std::ifstream sfile(dir / sf, std::ios::binary);
+            if (!sfile) continue;  // the state file is gone: the preset is harvested again
+            e.captured.state.assign(std::istreambuf_iterator<char>(sfile), std::istreambuf_iterator<char>());
+            e.captured.name = e.name;
+            e.state_file = sf;
+            e.params_file = p["params"].as_string();
+        }
+        out.push_back(std::move(e));
+    }
+    return out;
 }
 
 }  // namespace mimicry::targets

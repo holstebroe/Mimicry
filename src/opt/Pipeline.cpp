@@ -25,17 +25,20 @@ struct Budget {
 class Runner {
 public:
     Runner(Objective& objective, const Space& space, const PipelineOptions& options)
-        : obj_(objective), space_(space), opt_(options), start_(Clock::now()), rng_(options.seed) {}
+        : obj_(objective), space_(space), opt_(options), start_(Clock::now()),
+          rng_(options.seed + (options.resume ? 7919u * std::uint64_t(options.resume->sessions) : 0u)) {}
 
     PipelineResult run(const std::vector<std::vector<double>>& seeds);
 
 private:
-    [[nodiscard]] double now() const { return std::chrono::duration<double>(Clock::now() - start_).count(); }
+    // Run time including the earlier sessions of a resumed run, so the time cap is the run's, not the session's.
+    [[nodiscard]] double now() const { return base_s_ + std::chrono::duration<double>(Clock::now() - start_).count(); }
+    [[nodiscard]] bool cancelled() const { return opt_.cancel && opt_.cancel(); }
     [[nodiscard]] bool enabled(int stage) const {
         return opt_.stages.empty() || std::find(opt_.stages.begin(), opt_.stages.end(), stage) != opt_.stages.end();
     }
     [[nodiscard]] bool global_stop() const {
-        return now() >= opt_.time_cap_s || (opt_.max_evals > 0 && res_.evals >= opt_.max_evals) || (opt_.abort && opt_.abort());
+        return now() >= opt_.time_cap_s || (opt_.max_evals > 0 && res_.evals >= opt_.max_evals) || (opt_.abort && opt_.abort()) || cancelled();
     }
     // Keeps a failure for the reports when it is the first of its outcome and minimal set.
     void keep_failure(const std::vector<double>& coords, Outcome outcome, const BisectResult* bisect = nullptr);
@@ -82,7 +85,8 @@ private:
     void stage_refine();
     void select_top_k();
 
-    void begin_stage(const std::string& name, int free) {
+    void begin_stage(const std::string& name, int free, int id) {
+        stage_id_ = id;
         StageReport r;
         r.name = name;
         r.free = free;
@@ -92,12 +96,23 @@ private:
         res_.stages.push_back(r);
         stage_ = name;
         if (opt_.log) opt_.log(std::format("{}: {} free, best {:.3f} dB", name, free, best_.eval.loss));
+        if (opt_.on_stage) opt_.on_stage(res_.stages.back(), false);
     }
     void end_stage() {
         auto& r = res_.stages.back();
         r.after = best_.eval.loss;
         r.evals = res_.evals - r.evals;
         r.seconds = now() - r.seconds;
+        // A stage cut short by the time cap, the budget or a cancel is not done: a resume runs it again.
+        if (!global_stop() && !is_done(stage_id_)) done_.push_back(stage_id_);
+        if (opt_.on_stage) opt_.on_stage(r, true);
+        write_checkpoint();
+    }
+    [[nodiscard]] bool is_done(int id) const { return std::find(done_.begin(), done_.end(), id) != done_.end(); }
+    [[nodiscard]] PipelineState snapshot() const;
+    void write_checkpoint() {
+        last_checkpoint_ = now();
+        if (opt_.checkpoint) opt_.checkpoint(snapshot());
     }
     void remember(const Candidate& c);
 
@@ -109,6 +124,10 @@ private:
     PipelineResult res_;
     Candidate best_;
     std::string stage_;
+    int stage_id_ = 0;
+    double base_s_ = 0;                 // run time of the earlier sessions
+    std::vector<int> done_;             // stages finished (here or in an earlier session)
+    double last_checkpoint_ = 0;
     double last_progress_ = 0;
     std::vector<Candidate> kept_;       // S1 best K, starting points of the S5 restarts
     std::vector<Candidate> finalists_;  // candidates for the top-K set
@@ -140,6 +159,7 @@ std::vector<Candidate> Runner::evaluate(const std::vector<std::vector<double>>& 
     res_.evals += long(coords.size());
     learn(out);
     note_progress(stage_);
+    if (opt_.checkpoint && now() - last_checkpoint_ >= opt_.checkpoint_interval_s) write_checkpoint();
     return out;
 }
 
@@ -318,7 +338,7 @@ Candidate Runner::run_cma(const std::string& name, const std::vector<std::size_t
 
 void Runner::stage_seed() {
     const auto& active = space_.active();
-    begin_stage("S1 seed", int(active.size() + space_.categorical().size()));
+    begin_stage("S1 seed", int(active.size() + space_.categorical().size()), 1);
     long n = opt_.seed_samples;
     if (opt_.max_evals > 0) n = std::min(n, std::max(1L, opt_.max_evals / 4));
     const auto lhs = latin_hypercube(std::size_t(std::max(0L, n)), active.size(), rng_);
@@ -368,14 +388,14 @@ void Runner::sweep_categorical() {
 void Runner::stage_groups() {
     std::vector<std::size_t> prev;
     for (int s = 2; s <= 4 && !global_stop(); ++s) {
-        if (!enabled(s)) continue;
+        if (!enabled(s) || is_done(s)) continue;
         std::vector<std::size_t> free;
         for (auto i : space_.active())
             if (stage_of(space_.slot(i).group) <= s) free.push_back(i);
         if (free.empty() || free == prev) continue;
         prev = free;
         static constexpr const char* kNames[] = {"", "", "S2 osc+amp", "S3 +filter+env", "S4 +lfo+fx"};
-        begin_stage(kNames[s], int(free.size()));
+        begin_stage(kNames[s], int(free.size()), s);
         const Candidate start = best_;
         const auto got = run_cma(kNames[s], free, start, opt_.sigma_stage, share(0.12), opt_.seed + std::uint64_t(s) * 1000u);
         remember(got);
@@ -387,7 +407,7 @@ void Runner::stage_groups() {
 void Runner::stage_polish() {
     const auto& active = space_.active();
     if (active.empty()) return;
-    begin_stage(int(active.size()) > opt_.sep_threshold ? "S5 polish (sep-CMA-ES)" : "S5 polish (CMA-ES)", int(active.size()));
+    begin_stage(int(active.size()) > opt_.sep_threshold ? "S5 polish (sep-CMA-ES)" : "S5 polish (CMA-ES)", int(active.size()), 5);
     const int R = std::max(1, opt_.restarts);
     const double total = 0.75;  // of what is left; S6 and S7 share the rest
     const Budget all = share(total);
@@ -427,7 +447,7 @@ void Runner::stage_categorical() {
         if (v.size() >= 2 && int(v.size()) <= opt_.max_categorical_values) cats.push_back(c);
     }
     if (cats.empty() || !std::isfinite(best_.eval.loss)) return;
-    begin_stage("S6 categorical", int(cats.size()));
+    begin_stage("S6 categorical", int(cats.size()), 6);
     // Importance: the loss spread when one categorical changes on the best point.
     std::vector<std::vector<double>> probe;
     std::vector<std::size_t> owner;
@@ -498,7 +518,7 @@ void Runner::stage_categorical() {
 void Runner::stage_refine() {
     const auto& active = space_.active();
     if (active.empty() || !std::isfinite(best_.eval.loss)) return;
-    begin_stage("S7 refine", int(active.size()));
+    begin_stage("S7 refine", int(active.size()), 7);
     const Budget b = share(1.0);
     for (double delta : {0.04, 0.01}) {
         if (stop(b)) break;
@@ -566,40 +586,102 @@ void Runner::select_top_k() {
     }
 }
 
+PipelineState Runner::snapshot() const {
+    PipelineState st;
+    st.dimension = space_.size();
+    st.done = done_;
+    if (std::isfinite(best_.eval.loss)) {
+        st.best = best_.coords;
+        st.best_loss = best_.eval.loss;
+    } else {
+        st.best_loss = std::numeric_limits<double>::infinity();
+    }
+    for (const auto& k : kept_) st.kept.push_back(k.coords);
+    for (const auto& f : finalists_) st.finalists.push_back(f.coords);
+    st.elapsed_s = now();
+    st.evals = res_.evals;
+    st.sessions = opt_.resume ? opt_.resume->sessions + 1 : 1;
+    st.stages = res_.stages;
+    st.outcomes = res_.outcomes;
+    st.resampled = res_.resampled;
+    st.skipped = res_.skipped;
+    st.bisect_renders = res_.bisect_renders;
+    st.bisections = res_.bisections;
+    return st;
+}
+
 PipelineResult Runner::run(const std::vector<std::vector<double>>& seeds) {
     best_.eval.loss = std::numeric_limits<double>::infinity();
     best_.fitness = std::numeric_limits<double>::infinity();
     best_.coords = space_.defaults();
     stage_ = "S0";
+    const PipelineState* prev = opt_.resume;
+    if (prev) {
+        base_s_ = prev->elapsed_s;
+        done_ = prev->done;
+        res_.evals = prev->evals;
+        res_.stages = prev->stages;
+        res_.outcomes = prev->outcomes;
+        res_.resampled = prev->resampled;
+        res_.skipped = prev->skipped;
+        res_.bisect_renders = prev->bisect_renders;
+        res_.bisections = prev->bisections;
+        last_progress_ = base_s_;
+        last_checkpoint_ = base_s_;
+    }
     // Defaults and the given seeds (fingerprint neighbours, warm starts) first, made points of this space:
-    // fixed parameters (--fix, pinned pitch, ...) at default and steps on their grid.
+    // fixed parameters (--fix, pinned pitch, ...) at default and steps on their grid. A resumed run adds the
+    // earlier session's best, S1 points and finalists, re-scored (a candidate's features are not stored).
     std::vector<std::vector<double>> first{space_.defaults()};
     for (const auto& s : seeds)
         if (s.size() == space_.size()) first.push_back(space_.conform(s));
+    const std::size_t n_seeds = first.size();
+    std::size_t n_kept = 0, n_final = 0;
+    if (prev) {
+        auto add = [&](const std::vector<double>& v) {
+            if (v.size() != space_.size()) return false;
+            first.push_back(space_.conform(v));
+            return true;
+        };
+        add(prev->best);
+        for (const auto& k : prev->kept) n_kept += add(k);
+        for (const auto& f : prev->finalists) n_final += add(f);
+    }
     auto base = evaluate(first);
-    for (std::size_t i = 1; i < base.size(); ++i)
+    for (std::size_t i = 1; i < base.size() && i < n_seeds; ++i)
         if (std::isfinite(base[i].fitness)) kept_.push_back(base[i]);
+    if (prev) {
+        const std::size_t kept_at = first.size() - n_final - n_kept, final_at = first.size() - n_final;
+        for (std::size_t i = kept_at; i < final_at; ++i)
+            if (std::isfinite(base[i].fitness)) kept_.push_back(base[i]);
+        for (std::size_t i = final_at; i < base.size(); ++i) remember(base[i]);
+    }
 
-    if (enabled(1)) stage_seed();
+    if (enabled(1) && !is_done(1)) stage_seed();
     if (!space_.active().empty()) {
         // Every stage starts from the best so far; a stage only frees its group (spec 04 section 4).
         bool any_group = false;
         for (auto i : space_.active()) any_group = any_group || stage_of(space_.slot(i).group) < 5;
         if (any_group) stage_groups();
-        if (enabled(5)) stage_polish();
+        if (enabled(5) && !is_done(5)) stage_polish();
     }
-    if (enabled(6) && !global_stop()) stage_categorical();
-    if (enabled(7) && !global_stop()) stage_refine();
+    if (enabled(6) && !is_done(6) && !global_stop()) stage_categorical();
+    if (enabled(7) && !is_done(7) && !global_stop()) stage_refine();
     res_.time_capped = now() >= opt_.time_cap_s;
     res_.aborted = opt_.abort && opt_.abort();
-    if (res_.aborted) {
+    res_.cancelled = cancelled();
+    if (res_.aborted || res_.cancelled) {
+        // The finalists are not re-rendered for the top-K set; the best point is the one answer. A resume
+        // continues from the checkpoint.
         res_.best = best_;
-        res_.seconds = now();
-        return std::move(res_);
+        if (res_.cancelled && std::isfinite(best_.eval.loss)) res_.top_k.push_back(best_);
+    } else {
+        select_top_k();
+        res_.best = best_;
     }
-    select_top_k();
-    res_.best = best_;
     res_.seconds = now();
+    res_.state = snapshot();
+    if (opt_.checkpoint) opt_.checkpoint(res_.state);
     return std::move(res_);
 }
 

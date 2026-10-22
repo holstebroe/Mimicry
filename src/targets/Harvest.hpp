@@ -39,6 +39,11 @@ struct HarvestOptions {
     int abandon_after = 3;                     // a method whose first N presets are all no-change is abandoned [D]
     int stop_after = 8;                        // MIDI program change: N empty slots in a row end the bank [D]
     std::function<void(const struct HarvestEntry&)> progress;
+    // Polled before every preset: true stops the harvest with what it has (`HarvestResult::cancelled`).
+    std::function<bool()> cancel;
+    // Entries of an earlier, stopped harvest (`load_library`): their presets are not tried again, the ok ones
+    // keep their numbers and count for the duplicate check and for --max.
+    std::vector<struct HarvestEntry> prior;
 };
 
 struct HarvestEntry {
@@ -52,12 +57,16 @@ struct HarvestEntry {
     double difference = 0;         // render difference to the defaults (embedding units, dB-like)
     bool params_reproduce = false; // a render from the parameter snapshot matches the render from the state
     host::CapturedPreset captured; // kept for ok presets
+    int position = 0, of = 0;      // 1-based position of this preset among the `of` the method offers
+    // Set on entries read back from a library: files already written (names in the library folder).
+    std::string state_file, params_file;
 };
 
 struct MethodReport {
     host::PresetMethod method;
     int offered = 0, tried = 0, ok = 0;
     std::string note;              // why it stopped early, if it did
+    int resumed = 0;               // presets taken over from an earlier session
 };
 
 struct HarvestResult {
@@ -67,6 +76,7 @@ struct HarvestResult {
     double floor = 0;                          // render difference between two renders of the defaults
     double threshold = 0;                      // "same sound" below this
     std::string listing_error;                 // the plugin's preset listing failed (file presets were still tried)
+    bool cancelled = false;                    // options.cancel stopped the harvest; the library holds what was found
     [[nodiscard]] int ok_count() const;
 };
 
@@ -87,6 +97,10 @@ struct HarvestResult {
                                                                          const host::PluginInfo& info,
                                                                          const std::vector<host::ParamDesc>& params,
                                                                          const output::ValueText& text);
+
+// The library written by an earlier harvest of this plugin (`dir` from write_library): every entry of its
+// index.json, ok presets with their state. Feeds HarvestOptions::prior.
+[[nodiscard]] expected<std::vector<HarvestEntry>, std::string> load_library(const std::filesystem::path& dir);
 
 // FNV-1a 64 of a state blob, hex.
 [[nodiscard]] std::string state_hash(const std::vector<std::uint8_t>& state);

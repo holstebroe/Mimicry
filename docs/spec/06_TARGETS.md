@@ -56,6 +56,19 @@ time, flags), a folder of target states (and `.vstpreset` files for VST3 targets
 presets that could not be matched, defined as loss above 1.5x the repeatability floor after the full
 pipeline (typically a source feature the target lacks: an effect, a mod destination, a wavetable).
 
+Implemented [A] (WP5.3, first version, `app/CmdTransfer`): `mimicry transfer --source A --target B` renders each
+ok preset of the source's library (`--library DIR`, else `presets/<source>`, harvested on demand unless
+`--no-harvest`; `--from`/`--method` steer that harvest; `--preset NAME|N,...` and `--max N` pick presets) from its state
+through **one note plan** (`--note` C3, `--gate` 800 ms, `--velocity` 100: the probe plan above is WP5.2), and fits
+the target plugin to that render exactly as `mimicry fit` fits a WAV (the pitch is measured from the render, the
+gate of the target's note equals the source's), `--minutes` per preset (default 5), `--total-minutes` overall.
+The run directory holds a folder per preset (`NNN-name/`: `source.state`, `source.wav`, the fit's files) and
+`bank.json` / `bank-report.csv` (number, name, status, loss, gain, evaluations, time, flag `unmatched` when the
+loss is above 1.5 x the target's repeatability floor). There is no holdout, no warm start from a close preset and
+no ranking of several targets yet (WP5.11, 6.2). A transfer can be cancelled and resumed per preset and inside
+the running preset (09 §3). Source and target may be the same plugin, the same format or different formats
+(`cli_clap_to_vst3`).
+
 **Learned mapping**: see 04 §8. Mappings are keyed by (source format, source uid, target format,
 target uid).
 
@@ -181,7 +194,8 @@ files are tried whatever their extension; in `--from` folders `.state` (and `.vs
 every file with `--raw-files`; for VST3 also the standard folders (`~/.vst3/presets`, `/usr/share/vst3/presets`,
 `/usr/local/share/vst3/presets` on Linux; `~/Library/Audio/Presets`, `/Library/Audio/Presets` on macOS;
 `Documents\VST3 Presets`, `%APPDATA%\VST3 Presets`, `%PROGRAMDATA%\VST3 Presets` on Windows, each
-`/<vendor>/<plugin>`) [S: VST3 SDK]. A `params.json` as a preset source is not implemented yet. Effects
+`/<vendor>/<plugin>`) [S: VST3 SDK]. A `params.json` as a preset source is not implemented yet. A harvest can be cancelled and continued: `--continue`
+takes over the earlier session's tried presets from `index.json` (09 §3). Effects
 are verified like instruments until the effect probe signals exist (WP5.7).
 
 **Names** come from the plugin where a format offers them: CLAP discovery metadata; VST3 program names

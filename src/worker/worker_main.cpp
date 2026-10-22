@@ -213,6 +213,9 @@ int serve(std::size_t shm_bytes, const std::map<int, ipc::Handle>& handles) {
     // Plugins print to stdout; the protocol does not use it.
     ::dup2(2, 1);
 #endif
+    // Ctrl-C reaches the whole process group: the supervisor cancels gracefully (spec 04 section 10) and
+    // ends its workers itself, so a worker must not die of it in the middle of a render.
+    std::signal(SIGINT, SIG_IGN);
     auto handle = [&](int to) {
         const auto it = handles.find(to);
         return it == handles.end() ? ipc::kNoHandle : it->second;

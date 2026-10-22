@@ -83,8 +83,8 @@ src/opt/         RenderCache, Space (encoding), Objective (render + score), Embe
                  bisection, constraint store), Fingerprint, Surrogate
 src/output/      FailureReport, Report, AbWav, Ppm, PresetExport (state, params.json, .vstpreset), Svg,
                  DoctorReport
-src/app/         main + commands
-src/gui/         (later) Graphics/Font/ModernDraw/window glue taken from Acidus
+src/app/         main + commands (Cli, Console: events and cancel, RunDir, FitRun, CmdFit/CmdTransfer/CmdHarvest)
+src/gui/         front end: ChildProcess, Forms, RunModel (portable); win/ (Windows only: the window, 09)
 src/tests/       unit + integration executables; test_synth/ (hazard plugin, built as CLAP and VST3)
 tools/           analysis helpers
 docs/            plan, spec/
@@ -114,6 +114,12 @@ builds use IPO and size-optimise glue as in Acidus [S].
 | `mimicry rehearse <plugin>` | Round-trip self-test (plugin as its own target) |
 | `mimicry eval --plugin P --state S --wav T.wav` | Score without fitting [S: `--evaluate-only`] |
 | `mimicry replay <crash.json>` | Re-run a recorded failure, in-process, for debugging |
+| `mimicry runs [--json]` | List the run directories with status (09 §3) |
+| `mimicry cancel <run dir>` | Ask a running fit or transfer to stop cleanly and keep a checkpoint (09 §3) |
+
+Every command takes `--events` (stdout is one JSON object per line, 09 §2); `fit` and `transfer` take
+`--resume <run dir>` and `harvest` takes `--continue` (09 §3). The Windows program `mimicry_gui` is a front end
+that runs these commands (09).
 
 ## 7. Plugin profile
 

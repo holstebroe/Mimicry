@@ -123,6 +123,7 @@ endif()
 # Optimizer (docs/spec/04_OPTIMIZER.md): encoding, probe, pipeline, fingerprints, surrogate. Sees only the
 # format-agnostic host interface (PluginHost.hpp); renders go through a RenderBatch (a worker pool).
 add_library(mimicry_opt STATIC
+    src/opt/Checkpoint.cpp
     src/opt/Constraints.cpp
     src/opt/Embedding.cpp
     src/opt/Fingerprint.cpp
@@ -149,6 +150,8 @@ mimicry_warnings(mimicry_supervisor)
 add_library(mimicry_output STATIC
     src/output/FailureReport.cpp
     src/output/PresetExport.cpp
+    src/output/Ppm.cpp
+    src/output/VstPreset.cpp
 )
 target_link_libraries(mimicry_output PUBLIC mimicry_host mimicry_core)
 mimicry_warnings(mimicry_output)
@@ -160,12 +163,44 @@ add_library(mimicry_targets STATIC
 target_link_libraries(mimicry_targets PUBLIC mimicry_opt mimicry_output mimicry_host mimicry_core)
 mimicry_warnings(mimicry_targets)
 
+# Front end logic (docs/spec/09_GUI.md): forms, run model, child process. No windows, so it builds and is
+# tested everywhere; the Windows program on top of it is mimicry_gui.
+add_library(mimicry_gui_core STATIC
+    src/gui/ChildProcess.cpp
+    src/gui/Forms.cpp
+    src/gui/RunModel.cpp
+)
+target_link_libraries(mimicry_gui_core PUBLIC mimicry_core Threads::Threads)
+mimicry_warnings(mimicry_gui_core)
+
 # --- Executables -------------------------------------------------------------------------------
 
 # Supervisor / command line.
-add_executable(mimicry src/app/main.cpp)
+add_executable(mimicry
+    src/app/main.cpp
+    src/app/Cli.cpp
+    src/app/CmdFit.cpp
+    src/app/CmdHarvest.cpp
+    src/app/CmdTransfer.cpp
+    src/app/Console.cpp
+    src/app/FitRun.cpp
+    src/app/RunDir.cpp)
+target_include_directories(mimicry PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
 target_link_libraries(mimicry PRIVATE mimicry_targets mimicry_opt mimicry_output mimicry_supervisor mimicry_host mimicry_core)
 mimicry_warnings(mimicry)
+
+# Windows front end (docs/spec/09_GUI.md): a Win32 program that runs mimicry.exe --events as a child process. It loads
+# no plugin and includes no CLAP or VST3 header (CLAUDE.md rules 3, 4). Other platforms use the command line.
+if(WIN32)
+    add_executable(mimicry_gui WIN32
+        src/gui/win/MainWindow.cpp
+        src/gui/win/FormPanel.cpp
+        src/gui/win/LossGraph.cpp)
+    target_link_libraries(mimicry_gui PRIVATE mimicry_gui_core comctl32 comdlg32 shell32 ole32 user32 gdi32)
+    target_include_directories(mimicry_gui PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+    mimicry_warnings(mimicry_gui)
+    add_dependencies(mimicry_gui mimicry mimicry_worker)
+endif()
 
 # Render worker: the only process that loads plugins (docs/spec/05_RESILIENCE.md section 1).
 add_executable(mimicry_worker src/worker/worker_main.cpp)
@@ -230,6 +265,18 @@ if(MIMICRY_BUILD_TESTS)
     mimicry_warnings(mimicry_opt_test)
     add_test(NAME opt COMMAND mimicry_opt_test)
 
+    add_executable(mimicry_output_test src/tests/output_test_main.cpp)
+    target_link_libraries(mimicry_output_test PRIVATE mimicry_output)
+    target_include_directories(mimicry_output_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+    mimicry_warnings(mimicry_output_test)
+    add_test(NAME output COMMAND mimicry_output_test)
+
+    add_executable(mimicry_gui_test src/tests/gui_test_main.cpp)
+    target_link_libraries(mimicry_gui_test PRIVATE mimicry_gui_core)
+    target_include_directories(mimicry_gui_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+    mimicry_warnings(mimicry_gui_test)
+    add_test(NAME gui_core COMMAND mimicry_gui_test)
+
     add_executable(mimicry_core_test src/tests/core_test_main.cpp)
     target_link_libraries(mimicry_core_test PRIVATE mimicry_core)
     mimicry_warnings(mimicry_core_test)
@@ -263,7 +310,20 @@ if(MIMICRY_BUILD_TESTS)
         add_dependencies(mimicry_harvest_test mimicry_test_synth mimicry_worker mimicry)
         add_test(NAME harvest_clap COMMAND mimicry_harvest_test $<TARGET_FILE:mimicry_test_synth> $<TARGET_FILE:mimicry_worker> $<TARGET_FILE:mimicry>)
 
+        # The command line as a front end drives it: events, cancel, resume, transfer (docs/spec/09_GUI.md).
+        add_executable(mimicry_cli_test src/tests/cli_test_main.cpp)
+        target_link_libraries(mimicry_cli_test PRIVATE mimicry_core)
+        target_include_directories(mimicry_cli_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+        mimicry_warnings(mimicry_cli_test)
+        add_dependencies(mimicry_cli_test mimicry_test_synth mimicry_worker mimicry)
+        add_dependencies(mimicry_gui_test mimicry_test_synth mimicry_worker mimicry)
+        add_test(NAME gui_e2e_clap COMMAND mimicry_gui_test $<TARGET_FILE:mimicry_test_synth> $<TARGET_FILE:mimicry>)
+        add_test(NAME cli_clap COMMAND mimicry_cli_test $<TARGET_FILE:mimicry_test_synth> $<TARGET_FILE:mimicry>)
+
         if(MIMICRY_TEST_SYNTH_VST3)
+            add_dependencies(mimicry_cli_test mimicry_test_synth_vst3_build)
+            add_test(NAME cli_vst3 COMMAND mimicry_cli_test ${MIMICRY_TEST_SYNTH_VST3} $<TARGET_FILE:mimicry>)
+            add_test(NAME cli_clap_to_vst3 COMMAND mimicry_cli_test $<TARGET_FILE:mimicry_test_synth> $<TARGET_FILE:mimicry> ${MIMICRY_TEST_SYNTH_VST3})
             add_dependencies(mimicry_fit_test mimicry_test_synth_vst3_build)
             add_test(NAME fit_vst3 COMMAND mimicry_fit_test ${MIMICRY_TEST_SYNTH_VST3} $<TARGET_FILE:mimicry_worker> $<TARGET_FILE:mimicry>)
             add_dependencies(mimicry_harvest_test mimicry_test_synth_vst3_build)

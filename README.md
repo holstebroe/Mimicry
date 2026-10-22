@@ -3,11 +3,27 @@
 Offline tool that hosts a CLAP or VST3 plugin and uses a non-linear optimizer to find the preset that
 matches a WAV, an image, or another plugin's preset. C++20, CMake, no frameworks.
 
-**Status: first working fit.** CLAP and VST3 hosting in isolated worker processes, the feature loss and
-the optimizer (CMA-ES pipeline, sensitivity probe, fingerprints) are in place: `mimicry list`, `probe`,
-`fingerprint`, `fit` and `harvest` (automatic preset harvest) work. Plugin-to-plugin transfer, image
-targets, reports and `.vstpreset` export are next: see `docs/PROJECT_PLAN.md` for the work packages and
-their order.
+**Status: working fit, harvest and transfer, with a Windows front end.** CLAP and VST3 hosting in isolated
+worker processes, the feature loss and the optimizer (CMA-ES pipeline, sensitivity probe, fingerprints) are in
+place: `mimicry list`, `probe`, `fingerprint`, `fit`, `eval`, `harvest` (automatic preset harvest) and a first
+`transfer` (a source plugin's presets matched in a target plugin) work. Runs can be **cancelled and resumed**,
+write `report.md`, `diff.ppm` and (VST3) `.vstpreset` files, and report progress as JSON lines for a program to
+read. On Windows `mimicry_gui.exe` puts forms and a live monitor on top of the command line. Image targets,
+effects, `map` and `doctor` are next: see `docs/PROJECT_PLAN.md` for the work packages and their order.
+
+## Use
+
+```
+mimicry fit --plugin Synth.vst3 --wav target.wav --minutes 20     # Ctrl-C stops cleanly; results so far are kept
+mimicry fit --resume runs/20261021-101500-Synth-target            # continue it later
+mimicry transfer --source A.clap --target B.vst3 --max 10         # A's presets, matched in B
+mimicry harvest Synth.vst3 && mimicry runs
+mimicry fit ... --events                                          # one JSON object per line, for an agent or a front end
+```
+
+Windows: run `mimicry_gui.exe` (next to `mimicry.exe`). It has a tab per command, a progress monitor with the
+loss curve, stage and preset tables, Cancel / Resume, and drag and drop for plugins and WAVs
+(`docs/spec/09_GUI.md`).
 
 ## What it will do
 
@@ -54,7 +70,8 @@ src/supervisor/  worker client and pool with watchdog
 src/targets/     preset harvest; WAV, plugin and image targets (planned)
 src/opt/         encoding, objective, probe and profile, pipeline, fingerprints, surrogate
 src/output/      failure reports, preset files (params.json, state); reports and .vstpreset planned
-src/app/         the mimicry command line
+src/app/         the mimicry command line (events, cancel/resume, fit, transfer, harvest)
+src/gui/         front end: portable logic, and the Windows program in win/
 src/tests/       tests and the test synth (CLAP, and VST3 through clap-wrapper)
 docs/            PROJECT_PLAN.md and spec/
 ```
