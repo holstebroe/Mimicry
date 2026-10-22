@@ -229,7 +229,14 @@ expected<HarvestResult, std::string> harvest(host::Instance& inst, const Harvest
             js.coords.clear();
             js.state = e.captured.state;
             const Rendered r = render(js);
-            if (!r.ok) continue;  // the earlier state no longer renders: dropped, and the preset is not tried again
+            if (!r.ok) {  // the earlier state no longer renders: kept as a failure (spec 05), not tried again
+                e.outcome = PresetOutcome::NotReproducible;
+                e.message = "the state saved by the earlier session no longer renders";
+                e.number = 0;
+                e.captured = {};
+                result.entries.push_back(std::move(e));
+                continue;
+            }
             ++mr.ok;
             if (!before_first_ok.count(e.ref.method)) before_first_ok[e.ref.method] = e.ref;
             ok_index.push_back(result.entries.size());

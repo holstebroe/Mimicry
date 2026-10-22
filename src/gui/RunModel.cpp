@@ -32,6 +32,14 @@ void RunModel::begin(const std::string& command_name) {
     state = RunState::Starting;
 }
 
+void RunModel::push_log(std::string line) {
+    log.push_back(std::move(line));
+    while (log.size() > 3000) {
+        log.pop_front();
+        ++log_dropped;
+    }
+}
+
 void RunModel::apply_line(const std::string& line, bool from_stderr) {
     if (!line.empty() && line.front() == '{' && !from_stderr) {
         if (auto v = json::parse(line); v && v->is_object()) {
@@ -40,8 +48,7 @@ void RunModel::apply_line(const std::string& line, bool from_stderr) {
         }
     }
     if (!line.empty()) {
-        log.push_back(from_stderr ? "! " + line : line);
-        while (log.size() > 3000) log.pop_front();
+        push_log(from_stderr ? "! " + line : line);
     }
 }
 
@@ -152,6 +159,7 @@ void RunModel::apply(const json::Value& e) {
     } else if (kind == "bank") {
         presets = int(e["presets"].as_number());
         presets_done = int(e["done"].as_number());
+        if (presets_done_at_start < 0) presets_done_at_start = presets_done;
         if (bank.size() < std::size_t(presets)) bank.resize(std::size_t(presets));
         for (std::size_t i = 0; i < bank.size(); ++i)
             if (bank[i].index == 0) {
@@ -161,8 +169,7 @@ void RunModel::apply(const json::Value& e) {
     } else if (kind == "log") {
         const std::string level = e["level"].as_string();
         const std::string text = e["text"].as_string();
-        log.push_back(level == "warn" ? "note: " + text : text);
-        while (log.size() > 3000) log.pop_front();
+        push_log(level == "warn" ? "note: " + text : text);
     } else if (kind == "done") {
         const std::string status = e["status"].as_string();
         state = status == "finished" ? RunState::Finished : status == "cancelled" ? RunState::Cancelled : RunState::Failed;
@@ -213,7 +220,11 @@ double RunModel::eta_seconds() const {
     for (const auto& b : bank) spent += (b.status == "done" || b.status == "failed") ? b.seconds : 0.0;
     if (command == "harvest") return -1;
     if (spent <= 0) return -1;
-    return std::max(0.0, spent / f - spent);
+    // Only the work of this session has a time attached: measure the fraction from where it started.
+    const double f0 = presets > 0 && presets_done_at_start > 0 ? double(presets_done_at_start) / double(presets) : 0.0;
+    const double fs = f0 < 1.0 ? (f - f0) / (1.0 - f0) : 0.0;
+    if (fs < 0.02) return -1;
+    return std::max(0.0, spent / fs - spent);
 }
 
 std::string RunModel::status_line() const {

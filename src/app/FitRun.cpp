@@ -189,7 +189,7 @@ FitOutcome run_fit(const FitSpec& sp) {
     po.prior = !a.has("--no-prior");
     po.constraints = &constraints;
     po.progress_interval_s = a.num("--progress-s", con.events() ? 1.0 : 15.0);
-    if (a.num("--preview-s", 10.0) > 0) po.progress_interval_s = std::min(po.progress_interval_s, a.num("--preview-s", 10.0));
+    // The A/B preview below has its own --preview-s throttle and rides on these ticks.
     po.checkpoint_interval_s = a.num("--checkpoint-s", 30.0);
     out.time_cap_s = po.time_cap_s;
     const std::string table_msg = "the plugin changed its parameter table during the run";

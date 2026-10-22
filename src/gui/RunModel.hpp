@@ -61,6 +61,7 @@ struct RunModel {
 
     // Bank (transfer): preset `preset` of `presets`, `presets_done` finished.
     int preset = 0, presets = 0, presets_done = 0;
+    int presets_done_at_start = -1;   // finished by earlier sessions of a resumed run (their time is not in the ETA)
     std::string preset_name;
 
     std::vector<StageRow> stages;     // of the current fit (a new preset starts a new list)
@@ -71,6 +72,8 @@ struct RunModel {
     int previews = 0;                 // how many live A/B files were announced
     std::map<std::string, std::string> files;  // done event: ab, match, report
     std::deque<std::string> log;      // newest last, capped
+    std::size_t log_dropped = 0;      // lines popped off the front so far; log[i] is line log_dropped + i overall
+    void push_log(std::string line);
 
     // Feeds one line of the child's output: a JSON event, or plain text for the log.
     void apply_line(const std::string& line, bool from_stderr = false);

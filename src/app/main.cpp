@@ -314,7 +314,8 @@ int main(int argc, char** argv) {
     const Args args = parse_args(argc, argv, 2);
     Console& console = Console::get();
     console.set_events(args.has("--events"));
-    console.install_signal_handlers();
+    // Only the commands that poll the cancel flag take over SIGINT/SIGTERM; the rest keep the default.
+    if (cmd == "fit" || cmd == "transfer" || cmd == "harvest") console.install_signal_handlers();
     if (console.events()) console.start_stdin_watcher(args.has("--cancel-on-eof"));
     if (cmd == "fit") return cmd_fit(args);
     if (cmd == "eval") return cmd_eval(args);

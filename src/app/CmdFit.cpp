@@ -136,8 +136,14 @@ int cmd_eval(const Args& a) {
     auto wav = read_wav(wav_path);
     if (!wav) return fail("eval", wav.error());
     features::AnalyzeOptions ao;
-    if (a.has("--note")) ao.key = features::parse_note_name(a.get("--note"));
-    if (a.has("--kind")) ao.kind = features::parse_kind(a.get("--kind"));
+    if (a.has("--note")) {
+        ao.key = features::parse_note_name(a.get("--note"));
+        if (!ao.key) return fail("eval", "bad --note");
+    }
+    if (a.has("--kind")) {
+        ao.kind = features::parse_kind(a.get("--kind"));
+        if (!ao.kind) return fail("eval", "bad --kind");
+    }
     auto target = features::Target::from_wav(*wav, ao);
     if (!target) return fail("eval", target.error());
     const auto& an = target->analysis();
@@ -152,6 +158,8 @@ int cmd_eval(const Args& a) {
     if (fs::path(state_path).extension() == ".vstpreset") {
         auto parsed = output::parse_vstpreset(state);
         if (!parsed) return fail("eval", parsed.error());
+        if (p.info.format != host::PluginFormat::Vst3 || parsed->class_id != p.info.uid)
+            return fail("eval", std::format("{} is a preset for class {}, not for this plugin", state_path, parsed->class_id));
         state = output::vst3_state_from_chunks(parsed->chunks);
     }
     const auto stored = load_profile(a, p.info);
@@ -181,7 +189,11 @@ int cmd_eval(const Args& a) {
     if (a.has("--out")) {
         if (auto w = output::write_text(a.get("--out"), out.dump(2) + "\n"); !w) return fail("eval", w.error());
     }
-    if (con.events() || a.has("--json")) {
+    if (con.events()) {
+        con.done("finished", out);
+        return 0;
+    }
+    if (a.has("--json")) {
         std::fputs((out.dump() + "\n").c_str(), stdout);
         return 0;
     }

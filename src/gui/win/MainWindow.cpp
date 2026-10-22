@@ -37,8 +37,8 @@ using namespace mimicry::gui::win;
 namespace fs = std::filesystem;
 
 enum : UINT {
-    WM_APP_LINE = WM_APP + 1,   // wParam: from stderr, lParam: std::string* (owned by the receiver)
-    WM_APP_EXIT = WM_APP + 2,   // wParam: exit code
+    WM_APP_LINE = WM_APP + 1,   // wParam: run generation << 1 | from stderr, lParam: std::string* (owned by the receiver)
+    WM_APP_EXIT = WM_APP + 2,   // wParam: exit code, lParam: run generation
     WM_APP_RUNS = WM_APP + 3,   // lParam: std::string* (JSON of `mimicry runs --json`)
 };
 
@@ -75,6 +75,7 @@ private:
     void send_cancel();
     void on_line(bool err, std::string* line);
     void on_exit(int code);
+    unsigned run_gen_ = 0;  // which child a posted message belongs to; a late message of an earlier run is dropped
     void refresh();
     void update_buttons();
     void set_table_mode(TableMode mode);
@@ -458,15 +459,16 @@ void App::refresh() {
 }
 
 void App::log_append_all() {
-    // The model's log is capped and may have dropped old lines; show it whole when it shrank, else append.
-    if (log_shown_ > model_.log.size()) {
+    // log_shown_ counts lines overall; the model's capped log starts at line log_dropped.
+    const std::size_t total = model_.log_dropped + model_.log.size();
+    if (log_shown_ > total) {
         set_text(log_, "");
         log_shown_ = 0;
     }
-    if (log_shown_ == model_.log.size()) return;
+    if (log_shown_ == total) return;
     std::wstring chunk;
-    for (std::size_t i = log_shown_; i < model_.log.size(); ++i) chunk += widen(model_.log[i]) + L"\r\n";
-    log_shown_ = model_.log.size();
+    for (std::size_t n = std::max(log_shown_, model_.log_dropped); n < total; ++n) chunk += widen(model_.log[n - model_.log_dropped]) + L"\r\n";
+    log_shown_ = total;
     const int len = GetWindowTextLengthW(log_);
     SendMessageW(log_, EM_SETSEL, len, len);
     SendMessageW(log_, EM_REPLACESEL, FALSE, reinterpret_cast<LPARAM>(chunk.c_str()));
@@ -523,13 +525,14 @@ void App::start_run(bool resume, const std::string& run_dir) {
     active_form_id_ = form->id;
     log_shown_ = 0;
     set_text(log_, "");
-    model_.log.push_back("> mimicry " + [&] { std::string s; for (const auto& a : args) s += (s.empty() ? "" : " ") + a; return s; }());
+    model_.push_log("> mimicry " + [&] { std::string s; for (const auto& a : args) s += (s.empty() ? "" : " ") + a; return s; }());
     if (playing_) toggle_ab();
     child_ = std::make_unique<ChildProcess>();
     HWND h = hwnd_;
+    const unsigned gen = ++run_gen_;
     auto r = child_->start(exe, args,
-                           [h](const std::string& line, bool err) { PostMessageW(h, WM_APP_LINE, err ? 1 : 0, reinterpret_cast<LPARAM>(new std::string(line))); },
-                           [h](int code) { PostMessageW(h, WM_APP_EXIT, WPARAM(code), 0); }, work_dir());
+                           [h, gen](const std::string& line, bool err) { PostMessageW(h, WM_APP_LINE, WPARAM(gen) << 1 | (err ? 1 : 0), reinterpret_cast<LPARAM>(new std::string(line))); },
+                           [h, gen](int code) { PostMessageW(h, WM_APP_EXIT, WPARAM(code), LPARAM(gen)); }, work_dir());
     if (!r) {
         model_.state = RunState::Failed;
         model_.error = r.error();
@@ -680,8 +683,13 @@ LRESULT App::proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                 child_->terminate();
             }
             return 0;
-        case WM_APP_LINE: on_line(wp != 0, reinterpret_cast<std::string*>(lp)); return 0;
-        case WM_APP_EXIT: on_exit(int(wp)); return 0;
+        case WM_APP_LINE:
+            if (unsigned(wp >> 1) != run_gen_) delete reinterpret_cast<std::string*>(lp);
+            else on_line((wp & 1) != 0, reinterpret_cast<std::string*>(lp));
+            return 0;
+        case WM_APP_EXIT:
+            if (unsigned(lp) == run_gen_) on_exit(int(wp));
+            return 0;
         case WM_APP_RUNS: {
             std::unique_ptr<std::string> text(reinterpret_cast<std::string*>(lp));
             fill_runs(*text);

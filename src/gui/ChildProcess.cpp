@@ -47,7 +47,7 @@ struct ChildProcess::Impl {
     int exit_code = -1;
     bool started = false;
 #if defined(_WIN32)
-    HANDLE process = nullptr, in_write = nullptr, out_read = nullptr, err_read = nullptr;
+    HANDLE job = nullptr, process = nullptr, in_write = nullptr, out_read = nullptr, err_read = nullptr;
 #else
     pid_t pid = -1;
     int in_write = -1, out_read = -1, err_read = -1;
@@ -142,6 +142,14 @@ expected<void, std::string> ChildProcess::start(const std::filesystem::path& exe
         return unexpected("cannot start " + exe.string() + " (error " + std::to_string(err) + ")");
     }
     CloseHandle(pi.hThread);
+    // A job holds the whole process tree, so terminate() also ends mimicry_worker (which would keep the pipes open).
+    impl_->job = CreateJobObjectW(nullptr, nullptr);
+    if (impl_->job) {
+        JOBOBJECT_EXTENDED_LIMIT_INFORMATION lim{};
+        lim.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+        SetInformationJobObject(impl_->job, JobObjectExtendedLimitInformation, &lim, sizeof lim);
+        AssignProcessToJobObject(impl_->job, pi.hProcess);
+    }
     impl_->process = pi.hProcess;
     impl_->in_write = in_w;
     impl_->out_read = out_r;
@@ -185,7 +193,9 @@ void ChildProcess::close_stdin() {
 }
 
 void ChildProcess::terminate() {
-    if (impl_->started && running_) TerminateProcess(impl_->process, 1);
+    if (!impl_->started || !running_) return;
+    if (impl_->job) TerminateJobObject(impl_->job, 1);
+    else TerminateProcess(impl_->process, 1);
 }
 
 int ChildProcess::wait() {
@@ -195,7 +205,8 @@ int ChildProcess::wait() {
         if (impl_->out_read) CloseHandle(impl_->out_read);
         if (impl_->err_read) CloseHandle(impl_->err_read);
         if (impl_->process) CloseHandle(impl_->process);
-        impl_->out_read = impl_->err_read = impl_->process = nullptr;
+        if (impl_->job) CloseHandle(impl_->job);
+        impl_->out_read = impl_->err_read = impl_->process = impl_->job = nullptr;
         impl_->started = false;
     }
     return impl_->exit_code;
@@ -217,6 +228,7 @@ expected<void, std::string> ChildProcess::start(const std::filesystem::path& exe
     const pid_t pid = fork();
     if (pid < 0) return unexpected(std::string("fork failed"));
     if (pid == 0) {
+        setsid();  // own process group, so terminate() can end the workers too
         dup2(in_p[0], 0);
         dup2(out_p[1], 1);
         dup2(err_p[1], 2);
@@ -267,7 +279,7 @@ void ChildProcess::close_stdin() {
 }
 
 void ChildProcess::terminate() {
-    if (impl_->started && running_) kill(impl_->pid, SIGKILL);
+    if (impl_->started && running_) kill(-impl_->pid, SIGKILL);
 }
 
 int ChildProcess::wait() {
