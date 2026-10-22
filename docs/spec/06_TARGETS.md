@@ -218,6 +218,8 @@ Implemented as [D]: the capture window has *Capture*, *Teach click*, *Auto-captu
 status line; `--max N` and Cancel (Ctrl-C / `mimicry cancel`) end the session, `--continue` keeps the captures of
 an earlier session, and each capture is verified by a second worker (`PresetVerifier`, shared with `harvest`).
 Change signals (`take_change_signals`) are collected by the worker but `--watch` is not implemented yet (OQ13).
+A captured preset takes the plugin's own name when its state holds one: a string next to a key such as
+`presetName` or `displayName` (JUCE value trees do; `guess_preset_name`) [D]; else `capture-NNN`.
 Edits the plugin's controller makes in its editor are forwarded to the processor before the state is saved.
 
 **Taught click** (Teach click in the capture window; `--auto` replays the stored click) [A]: the user presses the plugin's own "next

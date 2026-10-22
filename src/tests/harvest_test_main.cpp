@@ -84,7 +84,16 @@ std::string read_file(const fs::path& p) {
 
 }  // namespace
 
+void check_name_guess() {
+    auto blob = [](const std::string& s) { return std::vector<std::uint8_t>(s.begin(), s.end()); };
+    check(targets::guess_preset_name(blob(std::string("xx\0displayName\0\x01\x12\x05" "Brass In The USA\0name\0", 40))) == "Brass In The USA", "name guess: JUCE tree");
+    check(targets::guess_preset_name(blob(std::string("presetName\0\x01\x20\x05" "A name that is thirty chars long\0", 52))) == "A name that is thirty chars long", "name guess: a printable length byte");
+    check(targets::guess_preset_name(blob("noname \x01\x02\x03")).empty(), "name guess: nothing found");
+    check(targets::guess_preset_name({}).empty(), "name guess: empty state");
+}
+
 int main(int argc, char** argv) {
+    check_name_guess();
     if (argc < 3) {
         std::fputs("usage: mimicry_harvest_test <plugin> <mimicry_worker> [<mimicry>]\n", stderr);
         return 2;

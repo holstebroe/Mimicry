@@ -49,6 +49,25 @@ int ladder_rank(PresetMethod m) noexcept {
     return 7;
 }
 
+std::string guess_preset_name(const std::vector<std::uint8_t>& state) {
+    const std::string_view blob(reinterpret_cast<const char*>(state.data()), state.size());
+    for (const std::string_view key : {"presetName", "displayName", "preset_name", "patchName", "programName"}) {
+        for (std::size_t at = blob.find(key); at != std::string_view::npos; at = blob.find(key, at + 1)) {
+            std::size_t i = at + key.size();
+            if (i >= blob.size() || blob[i] != '\0') continue;  // the whole key, not a prefix of a longer one
+            ++i;
+            // a few type / length bytes sit between the key and the text
+            if (i + 2 < blob.size() && blob[i] == '\x01' && blob[i + 2] == '\x05') i += 3;  // JUCE: 01 <length> 05 <text>
+            std::size_t skip = 0;
+            while (i < blob.size() && skip < 6 && (static_cast<unsigned char>(blob[i]) < 0x20 || static_cast<unsigned char>(blob[i]) == 0x7F)) ++i, ++skip;
+            std::string name;
+            while (i < blob.size() && name.size() < 128 && static_cast<unsigned char>(blob[i]) >= 0x20 && blob[i] != 0x7F) name += blob[i++];
+            if (name.size() >= 2 && std::ranges::any_of(name, [](char c) { return std::isalpha(static_cast<unsigned char>(c)) != 0; })) return name;
+        }
+    }
+    return {};
+}
+
 std::string state_hash(const std::vector<std::uint8_t>& state) {
     std::uint64_t h = 1469598103934665603ull;
     for (const std::uint8_t b : state) {

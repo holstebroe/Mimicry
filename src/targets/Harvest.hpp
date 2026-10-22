@@ -128,6 +128,11 @@ private:
 // index.json, ok presets with their state. Feeds HarvestOptions::prior.
 [[nodiscard]] expected<std::vector<HarvestEntry>, std::string> load_library(const std::filesystem::path& dir);
 
+// A preset name found inside a state blob: plugins that keep their preset in a key/value tree (JUCE ValueTree
+// and similar) store its name as a string next to a key such as "presetName" or "displayName". Used by
+// `capture` when the plugin does not name its presets itself [D]. Empty when nothing plausible is found.
+[[nodiscard]] std::string guess_preset_name(const std::vector<std::uint8_t>& state);
+
 // FNV-1a 64 of a state blob, hex.
 [[nodiscard]] std::string state_hash(const std::vector<std::uint8_t>& state);
 

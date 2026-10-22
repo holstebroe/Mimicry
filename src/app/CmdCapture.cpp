@@ -106,6 +106,9 @@ int cmd_capture(const Args& a) {
                 con.warn("lost a capture: " + cap.error().message);  // reported, not dropped (rule 6)
                 continue;
             }
+            // The plugin's own name for the preset, when its state holds one (the worker's default is capture-NNN).
+            if (cap->name.rfind("capture-", 0) == 0)
+                if (const std::string guessed = targets::guess_preset_name(cap->state); !guessed.empty()) cap->name = guessed;
             targets::HarvestEntry e;
             e.ref.method = host::PresetMethod::Capture;
             e.ref.index = taken;
