@@ -28,6 +28,7 @@ stderr (workers redirect their stdout to it) is not part of the protocol. Every 
 | `progress` | every `--progress-s` (1 s with `--events`) at a batch boundary | `stage`, `evals`, `best_db`, `seconds` (run time, including earlier sessions), `time_cap_s`, `fraction` (0..1, the larger of time and evaluation budget, below 1 until done), `evals_per_s`; in a transfer also `preset`, `presets`, `preset_name` |
 | `stage` | a pipeline stage begins or ends | `name`, `free`, `finished`, `before_db`, `after_db`, `evals`, `seconds` (+ preset members) |
 | `preset` | harvest: one preset tried | `method`, `index`, `position` of `of` in the method, `name`, `outcome`, `number`, `message`, `ok` so far |
+| `preview` | the best so far has a fresh A/B file (at most every `--preview-s`, 10 s; 0 turns it off) | `ab` (`preview-ab.wav`: target, 0.3 s pause, current match at the solved gain, 16-bit), `best_db` (+ preset members) |
 | `bank` | transfer: counts changed | `presets`, `done` |
 | `preset_start`, `preset_done` | transfer: a source preset starts / ends | `preset`, `presets`, `name`; done also `status`, `loss_db`, `evals`, `seconds`, `note` |
 | `log` | text for a person | `level` (`info` or `warn`), `text` |
@@ -132,7 +133,7 @@ every command.
   for a transfer) and the log.
 - **Buttons**: *Start*; *Cancel* (sends `cancel`; pressing it again becomes *Force stop*, which ends the process
   and leaves the last checkpoint); *Resume* (the cancelled or interrupted run; "+ minutes" adds time);
-  *Open folder*, *Play A/B* (`ab.wav`: target, pause, match), *Report* (`report.md`), *Spectrogram* (`diff.bmp`, the image of `diff.ppm` as a BMP, which Windows opens without a PPM viewer).
+  *Open folder*, *Play A/B* (plays `ab.wav` or, during a run, the latest `preview-ab.wav` from memory; press again to stop; usable at any time), *Report* (`report.md`), *Spectrogram* (`diff.bmp`, the image of `diff.ppm` as a BMP, which Windows opens without a PPM viewer).
 - Closing the window during a run asks, then cancels the run and waits for it to save (45 s at most).
 - Values are remembered in `%APPDATA%\Mimicry\gui.json`.
 

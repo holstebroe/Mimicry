@@ -147,6 +147,8 @@ void test_model() {
     check(m.state == RunState::Running && m.run_dir == "runs/r1" && m.plugin == "p.clap", "model: start");
     m.apply_line(ev(R"({"event":"phase","name":"fitting","time_cap_s":600,"workers":3})"));
     check(m.phase == "fitting" && m.time_cap_s == 600, "model: phase");
+    m.apply_line(ev(R"({"event":"preview","ab":"runs/r1/preview-ab.wav","best_db":9.5})"));
+    check(m.files["ab"] == "runs/r1/preview-ab.wav" && m.previews == 1, "model: a preview event makes A/B available");
     m.apply_line(ev(R"({"event":"stage","name":"S1 seed","free":18,"finished":false,"before_db":13.2,"after_db":0,"evals":1,"seconds":0})"));
     m.apply_line(ev(R"({"event":"progress","stage":"S1 seed","evals":100,"best_db":9.5,"seconds":10,"time_cap_s":600,"fraction":0.0166,"evals_per_s":10})"));
     m.apply_line(ev(R"({"event":"progress","stage":"S1 seed","evals":300,"best_db":7.5,"seconds":30,"time_cap_s":600,"fraction":0.05,"evals_per_s":10})"));

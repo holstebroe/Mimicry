@@ -6,6 +6,7 @@
 #include "gui/win/WinUtil.hpp"  // windows.h first
 
 #include <commctrl.h>
+#include <mmsystem.h>
 #include <shellapi.h>
 #include <shlobj.h>
 
@@ -13,6 +14,7 @@
 #include <atomic>
 #include <filesystem>
 #include <format>
+#include <fstream>
 #include <memory>
 #include <thread>
 
@@ -23,6 +25,7 @@
 #include "gui/win/LossGraph.hpp"
 
 #if defined(_MSC_VER)
+#pragma comment(lib, "winmm.lib")
 #pragma comment(linker, "\"/manifestdependency:type='win32' name='Microsoft.Windows.Common-Controls' version='6.0.0.0' processorArchitecture='*' publicKeyToken='6595b64144ccf1df' language='*'\"")
 #endif
 
@@ -49,6 +52,7 @@ enum : int {
 
 constexpr UINT_PTR kTimer = 1;
 constexpr UINT_PTR kForceTimer = 2;
+constexpr UINT_PTR kPlayTimer = 3;
 
 enum class TableMode { Stages, Presets, Bank };
 
@@ -85,6 +89,7 @@ private:
     void save_settings();
     void on_close();
     void log_append_all();
+    void toggle_ab();
 
     HINSTANCE inst_ = nullptr;
     HWND hwnd_ = nullptr, tab_ctl_ = nullptr, workdir_ = nullptr, work_label_ = nullptr, work_browse_ = nullptr, more_opts_ = nullptr;
@@ -106,6 +111,9 @@ private:
     bool dirty_ = true;
     bool closing_ = false;
     std::size_t log_shown_ = 0;
+    std::vector<char> play_buffer_;  // the A/B file being played (SND_MEMORY: the file stays free for the next preview)
+    bool playing_ = false;
+    ULONGLONG play_started_ = 0;
     std::vector<json::Value> runs_;
     std::atomic<bool> runs_busy_{false};
 };
@@ -227,7 +235,7 @@ void App::create_controls() {
         tip(b_cancel_, L"Stops after the batch in flight and saves the results so far. Press again to force-stop.");
         tip(b_resume_, L"Continues the cancelled run where it stopped. \"+ minutes\" adds time to the cap.");
         tip(more_min_, L"Extra minutes for a resumed fit or transfer. Empty: what is left of the time cap.");
-        tip(b_play_, L"Opens ab.wav: the target, a pause, then the match.");
+        tip(b_play_, L"Plays the target, a pause, then the current best match. Works while a run is going (refreshed every ~10 s).");
         tip(b_spectrogram_, L"Opens diff.bmp: spectrograms of the target, the match and their difference (blue: match quieter, red: louder).");
         tip(workdir_, L"Runs, profiles and preset libraries are made in this folder.");
     }
@@ -516,6 +524,7 @@ void App::start_run(bool resume, const std::string& run_dir) {
     log_shown_ = 0;
     set_text(log_, "");
     model_.log.push_back("> mimicry " + [&] { std::string s; for (const auto& a : args) s += (s.empty() ? "" : " ") + a; return s; }());
+    if (playing_) toggle_ab();
     child_ = std::make_unique<ChildProcess>();
     HWND h = hwnd_;
     auto r = child_->start(exe, args,
@@ -556,6 +565,28 @@ void App::on_exit(int code) {
     refresh();
     if (closing_) DestroyWindow(hwnd_);
     else if (model_.state == RunState::Finished || model_.state == RunState::Cancelled) FlashWindow(hwnd_, TRUE);
+}
+
+// Plays ab.wav (target, pause, match) of the run, also while it runs: the file is the latest preview of the best
+// so far. A second press stops it.
+void App::toggle_ab() {
+    if (playing_) {
+        PlaySoundW(nullptr, nullptr, 0);
+        playing_ = false;
+        SetWindowTextW(b_play_, L"Play A/B");
+        return;
+    }
+    const auto it = model_.files.find("ab");
+    if (it == model_.files.end()) return;
+    std::ifstream f(work_dir() / fs::path(widen(it->second)), std::ios::binary);
+    play_buffer_.assign(std::istreambuf_iterator<char>(f), std::istreambuf_iterator<char>());
+    if (play_buffer_.size() < 44) return;
+    if (PlaySoundW(reinterpret_cast<LPCWSTR>(play_buffer_.data()), nullptr, SND_MEMORY | SND_ASYNC)) {
+        playing_ = true;
+        play_started_ = GetTickCount64();
+        SetWindowTextW(b_play_, L"Stop A/B");
+        SetTimer(hwnd_, kPlayTimer, 500, nullptr);
+    }
 }
 
 void App::open_path(const std::string& path) {
@@ -635,7 +666,16 @@ LRESULT App::proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         }
         case WM_TIMER:
             if (wp == kTimer && (dirty_ || model_.active())) refresh();
-            else if (wp == kForceTimer && child_) {
+            else if (wp == kPlayTimer && playing_) {
+                // PlaySound has no end notification: the file's length says when it is over.
+                const std::size_t bytes = play_buffer_.size() > 44 ? play_buffer_.size() - 44 : 0;
+                const DWORD rate = play_buffer_.size() > 32 ? *reinterpret_cast<const DWORD*>(play_buffer_.data() + 28) : 96000;
+                if (GetTickCount64() - play_started_ > ULONGLONG(bytes * 1000.0 / std::max<DWORD>(rate, 1)) + 300) {
+                    playing_ = false;
+                    KillTimer(hwnd, kPlayTimer);
+                    SetWindowTextW(b_play_, L"Play A/B");
+                }
+            } else if (wp == kForceTimer && child_) {
                 KillTimer(hwnd, kForceTimer);
                 child_->terminate();
             }
@@ -716,11 +756,7 @@ LRESULT App::proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                         open_path((work_dir() / fs::path(widen(d))).string());
                         return 0;
                     }
-                    case IDC_PLAY: {
-                        const auto it = model_.files.find("ab");
-                        if (it != model_.files.end()) open_path((work_dir() / fs::path(widen(it->second))).string());
-                        return 0;
-                    }
+                    case IDC_PLAY: toggle_ab(); return 0;
                     case IDC_SPECTROGRAM: {
                         const auto it = model_.files.find("spectrogram");
                         if (it != model_.files.end()) open_path((work_dir() / fs::path(widen(it->second))).string());

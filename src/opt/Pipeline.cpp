@@ -223,7 +223,12 @@ void Runner::learn(const std::vector<Candidate>& cands) {
 void Runner::note_progress(const std::string& stage) {
     if (!opt_.progress || now() - last_progress_ < opt_.progress_interval_s) return;
     last_progress_ = now();
-    opt_.progress({stage, res_.evals, best_.eval.loss, now()});
+    Progress p{stage, res_.evals, best_.eval.loss, now()};
+    if (std::isfinite(best_.eval.loss)) {
+        p.best_coords = &best_.coords;
+        p.best_gain_db = best_.eval.score.gain_db;
+    }
+    opt_.progress(p);
 }
 
 void Runner::remember(const Candidate& c) {

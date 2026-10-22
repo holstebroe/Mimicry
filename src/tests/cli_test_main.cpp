@@ -171,6 +171,10 @@ void test_fit(const fs::path& dir, const std::string& plugin, bool vst3) {
         }
     check(monotonic && prev_evals >= 200, "fit: progress evals only grow, fraction stays below 1");
     const fs::path rd = run;
+    bool previewed = false;
+    for (const auto& e : ev) previewed = previewed || (e["event"].as_string() == "preview" && fs::exists(e["ab"].as_string()));
+    check(previewed && fs::file_size(rd / "preview-ab.wav") > 44, "fit: a live A/B preview was announced and written while it ran");
+    check(fs::file_size(rd / "ab.wav") > 44, "fit: ab.wav (16-bit) after the cancel");
     const auto meta1 = read_json(rd / "run.json");
     check(meta1["status"].as_string() == "cancelled", "fit: run.json says cancelled");
     check(fs::exists(rd / "checkpoint.json"), "fit: a checkpoint is left");

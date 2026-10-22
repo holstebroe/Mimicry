@@ -25,6 +25,9 @@ struct Progress {
     long evals = 0;
     double best = 0;       // best fitness so far (loss + penalties)
     double seconds = 0;    // run time, including earlier sessions of a resumed run
+    // The best candidate so far (valid during the callback): its full vector and level gain, for a live A/B.
+    const std::vector<double>* best_coords = nullptr;
+    double best_gain_db = 0;
 };
 
 struct PipelineOptions {

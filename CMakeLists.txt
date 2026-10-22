@@ -196,7 +196,7 @@ if(WIN32)
         src/gui/win/MainWindow.cpp
         src/gui/win/FormPanel.cpp
         src/gui/win/LossGraph.cpp)
-    target_link_libraries(mimicry_gui PRIVATE mimicry_gui_core comctl32 comdlg32 shell32 ole32 user32 gdi32)
+    target_link_libraries(mimicry_gui PRIVATE mimicry_gui_core comctl32 comdlg32 shell32 ole32 user32 gdi32 winmm)
     target_include_directories(mimicry_gui PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
     mimicry_warnings(mimicry_gui)
     add_dependencies(mimicry_gui mimicry mimicry_worker)

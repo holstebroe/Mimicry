@@ -68,6 +68,7 @@ struct RunModel {
     std::vector<PresetRow> harvested; // harvest
     std::vector<BankRow> bank;        // transfer
     int harvest_ok = 0;
+    int previews = 0;                 // how many live A/B files were announced
     std::map<std::string, std::string> files;  // done event: ab, match, report
     std::deque<std::string> log;      // newest last, capped
 

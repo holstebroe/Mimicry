@@ -82,6 +82,9 @@ void RunModel::apply(const json::Value& e) {
         }
         if (have_best) history.push_back({seconds, best_db, preset});
         if (state == RunState::Starting) state = RunState::Running;
+    } else if (kind == "preview") {  // a fresh A/B file of the best so far
+        files["ab"] = e["ab"].as_string();
+        ++previews;
     } else if (kind == "stage") {
         const std::string name = e["name"].as_string();
         const bool finished = e["finished"].as_bool();

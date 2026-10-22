@@ -188,6 +188,7 @@ FitOutcome run_fit(const FitSpec& sp) {
     po.prior = !a.has("--no-prior");
     po.constraints = &constraints;
     po.progress_interval_s = a.num("--progress-s", con.events() ? 1.0 : 15.0);
+    if (a.num("--preview-s", 10.0) > 0) po.progress_interval_s = std::min(po.progress_interval_s, a.num("--preview-s", 10.0));
     po.checkpoint_interval_s = a.num("--checkpoint-s", 30.0);
     out.time_cap_s = po.time_cap_s;
     const std::string table_msg = "the plugin changed its parameter table during the run";
@@ -204,8 +205,37 @@ FitOutcome run_fit(const FitSpec& sp) {
     auto add_preset = [&](json::Value& e) {
         if (sp.preset_index > 0) e.set("preset", sp.preset_index).set("presets", sp.preset_total).set("preset_name", sp.preset_name);
     };
+    // A/B of the best so far (spec 09 section 3): preview-ab.wav = target, pause, current match, rewritten when the
+    // best has changed and --preview-s (10) has passed; 16-bit so a front end can play it from memory.
+    const double preview_every = a.num("--preview-s", 10.0);
+    auto last_preview = std::chrono::steady_clock::now() - std::chrono::hours(1);
+    std::vector<double> previewed;
+    auto preview = [&](const opt::Progress& pr) {
+        if (preview_every <= 0 || !pr.best_coords || *pr.best_coords == previewed) return;
+        if (std::chrono::steady_clock::now() - last_preview < std::chrono::duration<double>(preview_every)) return;
+        auto audio = obj.render(*pr.best_coords);
+        if (!audio) return;
+        last_preview = std::chrono::steady_clock::now();
+        previewed = *pr.best_coords;
+        const float g = float(std::pow(10.0, pr.best_gain_db / 20.0));
+        WavData ab{job.sample_rate, 1, target.mono()};
+        ab.samples.resize(ab.samples.size() + std::size_t(0.3 * job.sample_rate), 0.0f);
+        for (float s : opt::mono_of(*audio)) ab.samples.push_back(s * g);
+        const auto tmp = dir / "preview-ab.tmp", dst = dir / "preview-ab.wav";
+        if (!write_wav(tmp, ab, WavFormat::Pcm16)) return;
+        std::error_code rec;
+        fs::rename(tmp, dst, rec);
+        if (rec) return;
+        if (con.events()) {
+            json::Value e;
+            e.set("event", "preview").set("ab", dst.string()).set("best_db", pr.best);
+            add_preset(e);
+            con.emit(std::move(e));
+        }
+    };
     po.progress = [&](const opt::Progress& pr) {
         if (sp.on_progress) sp.on_progress(pr);
+        preview(pr);
         if (!con.events()) {
             con.info(std::format("  [{:6.0f} s] {:<24} {:7} evals, best {:.3f} dB", pr.seconds, pr.stage, pr.evals, pr.best));
             return;
@@ -320,7 +350,7 @@ FitOutcome run_fit(const FitSpec& sp) {
         WavData ab{job.sample_rate, 1, target.mono()};
         ab.samples.resize(ab.samples.size() + std::size_t(0.3 * job.sample_rate), 0.0f);
         for (float s : mono) ab.samples.push_back(s * g);
-        (void)write_wav(dir / "ab.wav", ab);
+        (void)write_wav(dir / "ab.wav", ab, WavFormat::Pcm16);
         const auto img = output::spectrogram_comparison(target.mono(), mono, job.sample_rate, res.best.eval.score.gain_db);
         if (auto w = output::write_bytes(dir / "diff.ppm", output::ppm_bytes(img)); !w) con.warn(w.error());
         (void)output::write_bytes(dir / "diff.bmp", output::bmp_bytes(img));
