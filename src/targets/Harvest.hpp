@@ -9,6 +9,7 @@
 #include <cstdint>
 #include <filesystem>
 #include <functional>
+#include <memory>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -83,6 +84,31 @@ struct HarvestResult {
 // Ladder order (spec 06 section 6): files, the plugin's catalogue, program lists, MIDI program change,
 // program parameters.
 [[nodiscard]] int ladder_rank(host::PresetMethod m) noexcept;
+
+// Classifies presets against the defaults and the ones accepted before (spec 06 section 6): the loaded
+// state must differ from the defaults and from earlier presets, and the state blob alone must reproduce the
+// sound. Used by `harvest` and by `mimicry capture`, which gets its presets from the plugin's own window.
+class PresetVerifier {
+public:
+    [[nodiscard]] static expected<PresetVerifier, std::string> create(host::Instance& instance, const host::Job& plan);
+    PresetVerifier(PresetVerifier&&) noexcept;
+    PresetVerifier& operator=(PresetVerifier&&) noexcept;
+    ~PresetVerifier();
+    [[nodiscard]] double floor() const;
+    [[nodiscard]] double threshold() const;
+    // An ok entry of an earlier session (its number and state hash set): counts for the duplicate check.
+    // False when its state no longer renders.
+    bool adopt(const HarvestEntry& entry);
+    // Sets outcome, message, state_hash, difference, duplicate_of and params_reproduce of `entry`; an ok
+    // preset takes over `captured`. The caller sets the number and calls accept() for ok presets.
+    void verify(HarvestEntry& entry, host::CapturedPreset& captured);
+    void accept(const HarvestEntry& entry);
+
+private:
+    PresetVerifier();
+    struct Impl;
+    std::unique_ptr<Impl> impl_;
+};
 
 // File presets for step 1: the given files, the preset files in the given folders (.vstpreset, .state, CLAP
 // state files; any file with `raw_files`), and for VST3 the standard folders of the vendor and plugin.

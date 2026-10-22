@@ -7,6 +7,7 @@
 // Messages are one JSON object per line (see src/supervisor/WorkerClient.cpp for the client side). A
 // plugin that crashes or hangs takes this process down, not the supervisor.
 
+#include <algorithm>
 #include <atomic>
 #include <cstdint>
 #include <cstdio>
@@ -18,12 +19,16 @@
 #include <memory>
 #include <string>
 #include <string_view>
+#include <optional>
+#include <chrono>
+#include <algorithm>
 
 #include "core/Ipc.hpp"
 #include "core/Json.hpp"
 #include "core/Version.hpp"
 #include "host/Codec.hpp"
 #include "host/PluginHost.hpp"
+#include "worker/EditorWindow.hpp"
 
 #if defined(__linux__)
 #include <sys/prctl.h>
@@ -85,8 +90,14 @@ public:
         return channel_.write_line(reply.dump());
     }
 
+    ~Server() {
+        editor_.close();  // the plugin's view goes before the plugin
+        instance_.reset();
+    }
+
     void idle() {
         if (instance_) instance_->pump();
+        if (editor_.is_open()) editor_step();
     }
 
 private:
@@ -146,6 +157,7 @@ private:
             v.set("presets", std::move(out));
             return v;
         }
+        if (cmd.rfind("editor_", 0) == 0) return editor_command(cmd, msg);
         if (cmd == "apply_preset") {
             auto ref = host::preset_from_json(msg["ref"]);
             if (!ref) return error_reply(ref.error());
@@ -161,6 +173,250 @@ private:
             return v;
         }
         return error_reply(std::format("unknown command '{}'", cmd));
+    }
+
+    // --- the editor session (docs/spec/06_TARGETS.md section 6) ---
+
+    static std::string hash_of(const std::vector<std::uint8_t>& state) {  // as targets::state_hash
+        std::uint64_t h = 1469598103934665603ull;
+        for (const std::uint8_t b : state) {
+            h ^= b;
+            h *= 1099511628211ull;
+        }
+        return std::format("{:016x}-{}", h, state.size());
+    }
+
+    struct Capture {
+        host::CapturedPreset preset;
+        std::string hash;
+    };
+
+    // Takes the plugin's state as it is. False (with a status) when nothing changed since the last capture.
+    bool do_capture(const std::string& wanted_name) {
+        auto cap = instance_->capture_current(wanted_name);
+        if (!cap) {
+            editor_.set_status("capture failed: " + cap.error().message);
+            events_.push_back("capture failed: " + cap.error().message);
+            return false;
+        }
+        const std::string hash = hash_of(cap->state);
+        for (const auto& c : captures_)
+            if (c.hash == hash) {
+                editor_.set_status(std::format("Same state as capture #{}: pick another preset first.", &c - captures_.data() + 1));
+                last_capture_new_ = false;
+                return false;
+            }
+        cap->name = wanted_name.empty() ? std::format("capture-{:03}", captures_.size() + 1) : wanted_name;
+        captures_.push_back({std::move(*cap), hash});
+        last_capture_new_ = true;
+        editor_.set_status(std::format("Captured #{}: {}", captures_.size(), captures_.back().preset.name));
+        events_.push_back(std::format("captured {}", captures_.size()));
+        return true;
+    }
+
+    struct AutoRun {
+        bool running = false, waiting = false, real_input = false;
+        int max = 200, misses = 0, clicks = 0;
+        double wait_ms = 400;
+        std::chrono::steady_clock::time_point deadline;
+    };
+
+    void start_auto(int max, double wait_ms) {
+        if (!click_) {
+            editor_.set_status("Teach the \"next preset\" click first.");
+            return;
+        }
+        auto_ = AutoRun{};
+        auto_.running = true;
+        auto_.max = std::max(1, max);
+        auto_.wait_ms = std::max(50.0, wait_ms);
+        editor_.set_status("Auto-capture: clicking next and capturing...");
+        events_.push_back("auto started");
+        (void)do_capture({});  // the preset showing now is the first of the bank
+    }
+
+    void stop_auto(const std::string& why) {
+        if (!auto_.running) return;
+        auto_.running = false;
+        editor_.set_status("Auto-capture stopped: " + why);
+        events_.push_back("auto stopped: " + why);
+    }
+
+    // One step of the non-blocking state machines (called from the idle loop).
+    void editor_step() {
+        for (const std::string& action : editor_.take_actions()) {
+            if (action == "capture") {
+                (void)do_capture(editor_.take_name());
+            } else if (action == "teach") {
+                teach_now();
+            } else if (action == "auto") {
+                if (auto_.running) stop_auto("stopped by the user");
+                else start_auto(auto_max_, auto_wait_ms_);
+            } else if (action == "stop") {
+                stop_auto("stopped by the user");
+            } else if (action == "done") {
+                finish_editor();
+                return;
+            }
+        }
+        if (editor_.take_plugin_closed()) {
+            events_.push_back("the plugin closed its editor");
+            finish_editor();
+            return;
+        }
+        // Teaching: the click was recorded; once the plugin had time to react, check that it changed the state.
+        if (teach_.stage == Teach::Stage::Armed) {
+            if (auto c = editor_.take_click()) {
+                teach_.click = *c;
+                teach_.stage = Teach::Stage::Waiting;
+                teach_.deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(static_cast<int>(auto_wait_ms_));
+                editor_.set_status("Click recorded; checking that it changed the preset...");
+            }
+        } else if (teach_.stage == Teach::Stage::Waiting && std::chrono::steady_clock::now() >= teach_.deadline) {
+            teach_.stage = Teach::Stage::Off;
+            auto cap = instance_->capture_current({});
+            if (cap && hash_of(cap->state) != teach_.before_hash) {
+                click_ = teach_.click;
+                editor_.set_status("Click learned. Press Auto-capture to run through the bank.");
+                events_.push_back("click taught");
+            } else {
+                editor_.set_status("That click changed nothing. Press Teach again and click the plugin's \"next preset\" button once.");
+                events_.push_back("click changed nothing");
+            }
+        }
+        // Auto-capture: click, wait, capture; stop when the bank wraps, nothing changes three times or --max.
+        if (auto_.running) {
+            const auto now = std::chrono::steady_clock::now();
+            if (!auto_.waiting) {
+                if (!editor_.replay_click(*click_, auto_.real_input)) {
+                    stop_auto("the click could not be replayed");
+                    return;
+                }
+                ++auto_.clicks;
+                auto_.waiting = true;
+                auto_.deadline = now + std::chrono::milliseconds(static_cast<int>(auto_.wait_ms));
+            } else if (now >= auto_.deadline) {
+                auto_.waiting = false;
+                auto cap = instance_->capture_current({});
+                if (!cap) {
+                    stop_auto("capture failed: " + cap.error().message);
+                } else {
+                    const std::string hash = hash_of(cap->state);
+                    const bool seen = std::any_of(captures_.begin(), captures_.end(), [&](const Capture& c) { return c.hash == hash; });
+                    if (seen && !captures_.empty() && captures_.back().hash != hash) {
+                        stop_auto("the bank wrapped around");
+                    } else if (seen) {
+                        // The click changed nothing (same as the last capture): after two posted tries the real mouse.
+                        if (++auto_.misses == 2 && !auto_.real_input) {
+                            auto_.real_input = true;
+                            editor_.set_status("Posted clicks changed nothing; trying the real mouse...");
+                        } else if (auto_.misses >= 3) {
+                            stop_auto("three clicks in a row changed nothing");
+                        }
+                    } else {
+                        auto_.misses = 0;
+                        cap->name = std::format("capture-{:03}", captures_.size() + 1);
+                        captures_.push_back({std::move(*cap), hash});
+                        editor_.set_status(std::format("Auto-capture: {} presets", captures_.size()));
+                        events_.push_back(std::format("captured {}", captures_.size()));
+                        if (static_cast<int>(captures_.size()) >= auto_.max) stop_auto(std::format("reached {} presets", auto_.max));
+                    }
+                }
+            }
+        }
+        editor_.set_counts(static_cast<int>(captures_.size()), click_.has_value(), auto_.running);
+    }
+
+    void teach_now() {
+        auto cap = instance_->capture_current({});
+        if (!cap) {
+            editor_.set_status("capture failed: " + cap.error().message);
+            return;
+        }
+        teach_ = Teach{};
+        teach_.before_hash = hash_of(cap->state);
+        teach_.stage = Teach::Stage::Armed;
+        editor_.begin_teach();
+        editor_.set_status("Click the plugin's \"next preset\" button once.");
+    }
+
+    void finish_editor() {
+        auto_.running = false;
+        editor_.cancel_teach();
+        editor_.close();
+        events_.push_back("closed");
+    }
+
+    json::Value editor_command(const std::string& cmd, const json::Value& msg) {
+        if (cmd == "editor_open") {
+            if (editor_.is_open()) return error_reply("the editor is already open");
+            captures_.clear();
+            events_.clear();
+            click_.reset();
+            auto_ = AutoRun{};
+            teach_ = Teach{};
+            if (msg["click"].is_object()) click_ = click_from_json(msg["click"]);
+            auto size = editor_.open(*instance_, msg["title"].is_string() ? msg["title"].as_string() : instance_->info().name);
+            if (!size) return error_reply(size.error());
+            json::Value v = ok_reply();
+            v.set("width", size->width).set("height", size->height).set("resizable", size->resizable);
+            return v;
+        }
+        if (cmd == "editor_poll") {
+            json::Value v = ok_reply();
+            v.set("open", editor_.is_open()).set("captures", captures_.size()).set("teaching", teach_.stage != Teach::Stage::Off)
+                .set("taught", click_.has_value()).set("auto_running", auto_.running)
+                .set("signals", instance_->take_change_signals());
+            if (click_) v.set("click", click_to_json(*click_));
+            json::Array ev;
+            for (auto& e : events_) ev.push_back(std::move(e));
+            events_.clear();
+            v.set("events", std::move(ev));
+            return v;
+        }
+        if (cmd == "editor_take") {
+            const auto i = static_cast<std::size_t>(msg["index"].as_number());
+            if (i >= captures_.size()) return error_reply("no such capture");
+            const auto& c = captures_[i].preset;
+            if (c.state.size() > payload_) return error_reply("state larger than the shared memory");
+            std::memcpy(shm_.data(), c.state.data(), c.state.size());
+            json::Array coords;
+            for (double u : c.coords) coords.emplace_back(u);
+            json::Value v = ok_reply();
+            v.set("bytes", c.state.size()).set("coords", std::move(coords)).set("name", c.name).set("hash", captures_[i].hash);
+            return v;
+        }
+        if (cmd == "editor_action") {
+            const std::string& action = msg["action"].as_string();
+            if (!editor_.is_open()) return error_reply("the editor is not open");
+            if (msg["max"].is_number()) auto_max_ = static_cast<int>(msg["max"].as_number());
+            if (msg["wait_ms"].is_number()) auto_wait_ms_ = msg["wait_ms"].as_number();
+            if (action == "capture") (void)do_capture(msg["name"].as_string());
+            else if (action == "teach") teach_now();
+            else if (action == "auto") start_auto(auto_max_, auto_wait_ms_);
+            else if (action == "stop") stop_auto("stopped");
+            else if (action == "done") finish_editor();
+            else return error_reply("unknown editor action '" + action + "'");
+            return ok_reply();
+        }
+        if (cmd == "editor_close") {
+            if (editor_.is_open()) finish_editor();
+            return ok_reply();
+        }
+        return error_reply(std::format("unknown command '{}'", cmd));
+    }
+
+    static json::Value click_to_json(const worker::ClickRecord& c) {
+        json::Value v;
+        v.set("fx", c.fx).set("fy", c.fy).set("class", c.window_class);
+        return v;
+    }
+    static worker::ClickRecord click_from_json(const json::Value& v) {
+        worker::ClickRecord c;
+        c.fx = v["fx"].as_number();
+        c.fy = v["fy"].as_number();
+        c.window_class = v["class"].as_string();
+        return c;
     }
 
     json::Value render(const json::Value& job_json, std::size_t state_bytes) {
@@ -197,6 +453,22 @@ private:
     std::size_t payload_;
     std::uint64_t* blocks_;  // progress word at the end of the shared memory
     std::unique_ptr<host::Instance> instance_;
+
+    // The editor session.
+    worker::EditorWindow editor_;
+    std::vector<Capture> captures_;
+    std::vector<std::string> events_;
+    std::optional<worker::ClickRecord> click_;
+    bool last_capture_new_ = false;
+    int auto_max_ = 200;
+    double auto_wait_ms_ = 400;
+    AutoRun auto_;
+    struct Teach {
+        enum class Stage { Off, Armed, Waiting } stage = Stage::Off;
+        std::string before_hash;
+        worker::ClickRecord click;
+        std::chrono::steady_clock::time_point deadline;
+    } teach_;
 };
 
 int serve(std::size_t shm_bytes, const std::map<int, ipc::Handle>& handles) {

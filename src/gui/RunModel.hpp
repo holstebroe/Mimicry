@@ -11,6 +11,9 @@
 
 namespace mimicry::gui {
 
+// harvest and capture both report presets (events "preset").
+[[nodiscard]] inline bool is_harvest_like(const std::string& command) { return command == "harvest" || command == "capture"; }
+
 struct StageRow {
     std::string name;
     int free = 0;

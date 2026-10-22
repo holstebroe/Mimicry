@@ -74,6 +74,10 @@ cap, patience and evaluation budget count the whole run.
 (`pending`, `running`, `done`, `cancelled`, `failed`, `source-failed`). A resume skips finished presets and
 resumes the cancelled one inside its own checkpoint.
 
+**Capture** (`mimicry capture`, Windows) uses the harvest form's events (`preset` with method `capture`) and
+`done`; the plugin's own window opens beside the GUI and the run ends when it is closed with Done, `--max`
+is reached, or the run is cancelled (resumable with `--continue`). A harvest that finds nothing hints at it.
+
 **Harvest** has no run directory: `mimicry harvest --continue` reads the library's `index.json`, takes over the
 presets already tried (ok ones keep their numbers and are re-rendered once for the duplicate check) and tries
 only the rest. A cancelled harvest writes the library with what it has (`"cancelled": true` in `index.json`);

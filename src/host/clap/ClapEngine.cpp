@@ -49,6 +49,7 @@ public:
     }
 
     ~ClapEngine() override {
+        close_editor();
         if (plugin_) plugin_->destroy(plugin_);
         plugin_ = nullptr;
         if (entry_) entry_->deinit();
@@ -233,6 +234,58 @@ public:
 
     bool take_restart_request() override { return restart_.exchange(false); }
 
+    // Editor (Windows only): the `gui` extension with an embedded win32 window; the host side answers the plugin's
+    // resize requests (they may come from another thread: applied on the main thread in pump_main_thread).
+    expected<EditorSize, HostError> open_editor(void* parent, EditorEvents events) override {
+#if defined(_WIN32)
+        gui_ = static_cast<const clap_plugin_gui_t*>(plugin_->get_extension(plugin_, CLAP_EXT_GUI));
+        if (!gui_) return unexpected(HostError{"the plugin has no editor"});
+        close_editor();
+        if (!gui_->is_api_supported(plugin_, CLAP_WINDOW_API_WIN32, false))
+            return unexpected(HostError{"the plugin's editor does not support a Win32 window"});
+        if (!gui_->create(plugin_, CLAP_WINDOW_API_WIN32, false)) return unexpected(HostError{"the plugin's editor could not be created"});
+        gui_created_ = true;
+        editor_events_ = std::move(events);
+        gui_resize_pending_ = false;
+        clap_window_t window{};
+        window.api = CLAP_WINDOW_API_WIN32;
+        window.win32 = parent;
+        if (!gui_->set_parent(plugin_, &window)) {
+            close_editor();
+            return unexpected(HostError{"the plugin's editor could not attach to the window"});
+        }
+        uint32_t w = 800, h = 600;
+        if (!gui_->get_size(plugin_, &w, &h)) {
+            w = 800;
+            h = 600;
+        }
+        gui_->show(plugin_);
+        EditorSize size;
+        size.width = static_cast<int>(w);
+        size.height = static_cast<int>(h);
+        size.resizable = gui_->can_resize(plugin_);
+        return size;
+#else
+        (void)parent;
+        (void)events;
+        return unexpected(HostError{"plugin editors are hosted on Windows only"});
+#endif
+    }
+    void editor_resized(int width, int height) override {
+        if (!gui_ || !gui_created_) return;
+        uint32_t w = static_cast<uint32_t>(std::max(width, 1)), h = static_cast<uint32_t>(std::max(height, 1));
+        gui_->adjust_size(plugin_, &w, &h);
+        gui_->set_size(plugin_, w, h);
+    }
+    void close_editor() override {
+        if (!gui_ || !gui_created_) return;
+        gui_->hide(plugin_);
+        gui_->destroy(plugin_);
+        gui_created_ = false;
+        editor_events_ = {};
+    }
+    int take_change_signals() override { return change_signals_.exchange(0); }
+
     // --- presets (docs/spec/02_HOSTING.md section 7) ---
 
     std::vector<PresetRef> presets() override {
@@ -290,6 +343,12 @@ public:
 
     void pump_main_thread() override {
         if (callback_.exchange(false) && plugin_) plugin_->on_main_thread(plugin_);
+        if (gui_created_ && gui_resize_pending_.exchange(false) && editor_events_.resize) {
+            // The plugin asked for a new client size: the window follows, then the plugin is told it has it.
+            const int w = static_cast<int>(gui_resize_w_.load()), h = static_cast<int>(gui_resize_h_.load());
+            editor_events_.resize(w, h);
+            gui_->set_size(plugin_, static_cast<uint32_t>(w), static_cast<uint32_t>(h));
+        }
     }
 
     expected<void, HostError> start() override {
@@ -607,6 +666,20 @@ private:
     static void host_request_restart(const clap_host_t* h) { self(h)->restart_ = true; }
     static void host_request_process(const clap_host_t*) {}
     static void host_request_callback(const clap_host_t* h) { self(h)->callback_ = true; }
+    static void gui_resize_hints_changed(const clap_host_t*) {}
+    static bool gui_request_resize(const clap_host_t* h, uint32_t w, uint32_t hh) {
+        auto* e = self(h);
+        e->gui_resize_w_ = w;
+        e->gui_resize_h_ = hh;
+        e->gui_resize_pending_ = true;  // applied on the main thread (pump_main_thread)
+        return true;
+    }
+    static bool gui_request_show(const clap_host_t*) { return true; }
+    static bool gui_request_hide(const clap_host_t*) { return true; }
+    static void gui_closed(const clap_host_t* h, bool) {
+        auto* e = self(h);
+        if (e->editor_events_.closed) e->editor_events_.closed();
+    }
 
     static bool is_main_thread(const clap_host_t* h) { return std::this_thread::get_id() == self(h)->roles_->main; }
     static bool is_audio_thread(const clap_host_t* h) { return std::this_thread::get_id() == self(h)->roles_->audio.load(); }
@@ -633,6 +706,7 @@ private:
     }
     static void preset_loaded(const clap_host_t* h, uint32_t, const char* location, const char* key) {
         auto* e = self(h);
+        ++e->change_signals_;  // also a load the plugin's own browser made (watch mode)
         std::lock_guard lock(e->preset_mutex_);
         if (!e->current_preset(location, key)) return;
         e->preset_pending_ = false;
@@ -654,6 +728,8 @@ private:
         static const clap_host_tail_t tail{tail_changed};
         static const clap_host_log_t log{log_msg};
         static const clap_host_preset_load_t preset_load{preset_on_error, preset_loaded};
+        static const clap_host_gui_t gui{gui_resize_hints_changed, gui_request_resize, gui_request_show, gui_request_hide, gui_closed};
+        if (!std::strcmp(id, CLAP_EXT_GUI)) return &gui;
         if (!std::strcmp(id, CLAP_EXT_THREAD_CHECK)) return &thread_check;
         if (!std::strcmp(id, CLAP_EXT_PARAMS)) return &params;
         if (!std::strcmp(id, CLAP_EXT_STATE)) return &state;
@@ -676,6 +752,12 @@ private:
     const clap_plugin_audio_ports_t* audio_ports_ = nullptr;
     const clap_plugin_note_ports_t* note_ports_ = nullptr;
     const clap_plugin_preset_load_t* preset_load_ = nullptr;
+    const clap_plugin_gui_t* gui_ = nullptr;
+    bool gui_created_ = false;
+    EditorEvents editor_events_;
+    std::atomic<bool> gui_resize_pending_{false};
+    std::atomic<std::uint32_t> gui_resize_w_{0}, gui_resize_h_{0};
+    std::atomic<int> change_signals_{0};
 
     PluginInfo info_;
     std::vector<ParamDesc> params_list_;

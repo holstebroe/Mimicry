@@ -23,6 +23,7 @@ int cmd_eval(const Args& a);
 int cmd_runs(const Args& a);
 int cmd_cancel(const Args& a);
 int cmd_harvest(const Args& a);
+int cmd_capture(const Args& a);
 int cmd_transfer(const Args& a);
 
 }  // namespace mimicry::app

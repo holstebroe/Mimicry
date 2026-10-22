@@ -106,6 +106,10 @@ expected<HarvestSummary, std::string> harvest_to_library(host::Instance& inst, c
         else out += std::format("\nrecipe ({}) stored in {}", host::to_string(res->recipe->method), ppath.string());
     }
     if (res->cancelled) out += "\ncancelled; continue with --continue";
+    else if (res->ok_count() == 0)
+        out += "\nThe plugin offers no presets to the host (many keep them in their own browser or behind a login)."
+               "\nTry: mimicry capture <plugin>  - opens the plugin's window so you can pick presets yourself"
+               " (Windows), or --from <folder> for preset files.";
     con.info(out);
     return HarvestSummary{*dir, res->ok_count(), res->cancelled};
 }

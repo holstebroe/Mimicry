@@ -420,7 +420,7 @@ void App::update_buttons() {
     EnableWindow(b_cancel_, active);
     SetWindowTextW(b_cancel_, model_.state == RunState::Cancelling ? L"Force stop" : L"Cancel");
     const bool resumable = !active && (model_.state == RunState::Cancelled || model_.state == RunState::Failed) && model_.resumable &&
-                           (!model_.run_dir.empty() || model_.command == "harvest");
+                           (!model_.run_dir.empty() || is_harvest_like(model_.command));
     EnableWindow(b_resume_, resumable);
     const std::string dir = !model_.run_dir.empty() ? model_.run_dir : model_.library;
     EnableWindow(b_folder_, !dir.empty());
@@ -440,13 +440,13 @@ void App::refresh() {
                                model_.time_cap_s > 0 ? " of up to " + format_duration(model_.time_cap_s) : std::string(), model_.evals_per_s, model_.evals);
             if (eta >= 0) info += "   |   about " + format_duration(eta) + " left";
             if (model_.command == "transfer" && model_.presets > 0) info = std::format("{} of {} presets done   |   ", model_.presets_done, model_.presets) + info;
-        } else if (model_.command == "harvest") {
+        } else if (is_harvest_like(model_.command)) {
             info = std::format("{} presets verified   |   {} tried", model_.harvest_ok, model_.harvested.size());
         }
     }
     set_text(info_, info);
     // Table mode follows the command.
-    const TableMode want = model_.command == "harvest" ? TableMode::Presets : model_.command == "transfer" ? TableMode::Bank : TableMode::Stages;
+    const TableMode want = is_harvest_like(model_.command) ? TableMode::Presets : model_.command == "transfer" ? TableMode::Bank : TableMode::Stages;
     if (want != table_mode_) set_table_mode(want);
     ListView_SetItemCountEx(table_, row_count(), LVSICF_NOINVALIDATEALL | LVSICF_NOSCROLL);
     InvalidateRect(table_, nullptr, FALSE);

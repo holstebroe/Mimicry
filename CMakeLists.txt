@@ -181,6 +181,7 @@ add_executable(mimicry
     src/app/Cli.cpp
     src/app/CmdFit.cpp
     src/app/CmdHarvest.cpp
+    src/app/CmdCapture.cpp
     src/app/CmdTransfer.cpp
     src/app/Console.cpp
     src/app/FitRun.cpp
@@ -203,8 +204,12 @@ if(WIN32)
 endif()
 
 # Render worker: the only process that loads plugins (docs/spec/05_RESILIENCE.md section 1).
-add_executable(mimicry_worker src/worker/worker_main.cpp)
+add_executable(mimicry_worker src/worker/worker_main.cpp src/worker/EditorWindow.cpp)
+target_include_directories(mimicry_worker PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
 target_link_libraries(mimicry_worker PRIVATE mimicry_host mimicry_core)
+if(WIN32)
+    target_link_libraries(mimicry_worker PRIVATE user32 gdi32)
+endif()
 mimicry_warnings(mimicry_worker)
 
 # --- Test plugin (stub) ------------------------------------------------------------------------

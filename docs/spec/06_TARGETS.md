@@ -214,7 +214,13 @@ hash polled every 500 ms [D] for plugins whose presets change hidden state only 
 capture is verified and deduplicated as above, so the user can click through a whole bank with the
 plugin's own "next" arrow.
 
-**Taught click** (`mimicry capture --teach`, Windows) [A]: the user presses the plugin's own "next
+Implemented as [D]: the capture window has *Capture*, *Teach click*, *Auto-capture* and *Done* buttons and a
+status line; `--max N` and Cancel (Ctrl-C / `mimicry cancel`) end the session, `--continue` keeps the captures of
+an earlier session, and each capture is verified by a second worker (`PresetVerifier`, shared with `harvest`).
+Change signals (`take_change_signals`) are collected by the worker but `--watch` is not implemented yet (OQ13).
+Edits the plugin's controller makes in its editor are forwarded to the processor before the state is saved.
+
+**Taught click** (Teach click in the capture window; `--auto` replays the stored click) [A]: the user presses the plugin's own "next
 preset" button once. The worker records the click from the editor window's message hook: the child
 window under the cursor and the position relative to it, so it survives the window being moved. The
 click must change the state hash, else the user is asked to try again. Mimicry then replays it as posted

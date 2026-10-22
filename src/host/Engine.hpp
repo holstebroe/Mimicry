@@ -97,6 +97,18 @@ public:
     // True if Block::program reaches the plugin.
     [[nodiscard]] virtual bool midi_program_change() const { return false; }
 
+    // The plugin's editor (Windows only), main thread (docs/spec/02_HOSTING.md section 3, 06 section 6).
+    [[nodiscard]] virtual expected<EditorSize, HostError> open_editor(void* /*parent_window*/, EditorEvents /*events*/) {
+        return unexpected(HostError{"plugin editors are hosted on Windows only"});
+    }
+    virtual void editor_resized(int /*width*/, int /*height*/) {}
+    virtual void close_editor() {}
+    // Edits the user made in the editor that the processor has not seen yet (VST3: the controller's
+    // performEdit calls, which a host has to pass on); cleared by the call. The capture sends them in a block.
+    [[nodiscard]] virtual std::vector<ParamValue> take_edits() { return {}; }
+    // Preset-change signals since the last call (see Instance::take_change_signals).
+    [[nodiscard]] virtual int take_change_signals() { return 0; }
+
     // render thread
     [[nodiscard]] virtual expected<void, HostError> start() = 0;
     virtual void stop() = 0;

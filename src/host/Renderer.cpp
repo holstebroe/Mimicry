@@ -290,6 +290,9 @@ expected<CapturedPreset, HostError> Renderer::apply_preset(const PresetRef& ref,
             loaded = run_silence(wait_frames, std::span<const ParamValue>(&pv, 1), -1, -1);
             break;
         }
+        case PresetMethod::Capture:
+            loaded = unexpected(HostError{"a captured preset is made in the editor, not applied"});
+            break;
         case PresetMethod::MidiProgram:
             if (!engine_->midi_program_change()) {
                 loaded = unexpected(HostError{"the plugin takes no MIDI program change"});
@@ -330,6 +333,48 @@ expected<CapturedPreset, HostError> Renderer::apply_preset(const PresetRef& ref,
     }
     // Back to the clean state: later renders must not inherit the preset's hidden state.
     if (auto r = restart_engine(); r && !clean_.empty()) (void)load_state(clean_);
+    return out;
+}
+
+expected<EditorSize, HostError> Renderer::open_editor(void* parent_window, EditorEvents events) {
+    try {
+        return engine_->open_editor(parent_window, std::move(events));
+    } catch (const std::exception& e) {
+        return unexpected(HostError{std::format("open_editor: plugin threw '{}'", e.what())});
+    } catch (...) {
+        return unexpected(HostError{"open_editor: plugin threw an unknown exception"});
+    }
+}
+
+// The state of an editor session as it is: the user's edits the processor has not seen yet go in as one silent
+// block (VST3 controller edits), then the plugin's state and every parameter are read. Nothing is reset or
+// reloaded, so the user can go on browsing.
+expected<CapturedPreset, HostError> Renderer::capture_current(const std::string& name) {
+    message_.clear();
+    pump();
+    std::vector<ParamValue> edits;
+    try {
+        edits = engine_->take_edits();
+    } catch (...) {
+    }
+    if (!edits.empty()) {
+        if (auto r = run_silence(std::max(frames_for(20.0, rate_), 1), edits, -1, -1); !r) return unexpected(r.error());
+    }
+    CapturedPreset out;
+    out.name = name;
+    auto st = save_state();
+    if (!st) return unexpected(st.error());
+    out.state = std::move(*st);
+    const auto& params = engine_->parameters();
+    out.coords.reserve(params.size());
+    for (const ParamDesc& p : params) {
+        std::optional<double> u;
+        try {
+            u = engine_->param_coord(p.id);
+        } catch (...) {
+        }
+        out.coords.push_back(u && std::isfinite(*u) ? std::clamp(*u, 0.0, 1.0) : p.default_coord);
+    }
     return out;
 }
 

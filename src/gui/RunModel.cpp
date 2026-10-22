@@ -218,7 +218,7 @@ double RunModel::eta_seconds() const {
     // Bank and harvest: elapsed work so far over the fraction done. Elapsed is the sum of what the presets took.
     double spent = seconds;
     for (const auto& b : bank) spent += (b.status == "done" || b.status == "failed") ? b.seconds : 0.0;
-    if (command == "harvest") return -1;
+    if (is_harvest_like(command)) return -1;
     if (spent <= 0) return -1;
     // Only the work of this session has a time attached: measure the fraction from where it started.
     const double f0 = presets > 0 && presets_done_at_start > 0 ? double(presets_done_at_start) / double(presets) : 0.0;
@@ -235,7 +235,7 @@ std::string RunModel::status_line() const {
         case RunState::Cancelled: return resumable ? "Cancelled. The results so far are saved; the run can be resumed." : "Cancelled.";
         case RunState::Failed: return "Failed: " + (error.empty() ? std::string("see the log") : error);
         case RunState::Finished:
-            if (command == "harvest") return std::format("Finished: {} presets harvested.", harvest_ok);
+            if (is_harvest_like(command)) return std::format("Finished: {} presets harvested.", harvest_ok);
             if (command == "transfer") return std::format("Finished: {} of {} presets.", presets_done, presets);
             if (have_best) return std::format("Finished: {:.3f} dB.", best_db);
             return "Finished.";
@@ -247,7 +247,7 @@ std::string RunModel::status_line() const {
     else if (!stage.empty() && command == "fit")
         s = stage;
     if (have_best && (command == "fit" || command == "transfer")) s += std::format("   best {:.3f} dB", best_db);
-    if (command == "harvest") s += std::format("   {} ok", harvest_ok);
+    if (is_harvest_like(command)) s += std::format("   {} ok", harvest_ok);
     return s;
 }
 

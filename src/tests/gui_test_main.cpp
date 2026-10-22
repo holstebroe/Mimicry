@@ -79,6 +79,16 @@ void test_forms() {
     h["harvest.max"] = "20";
     const auto ha = build_args(*harvest, h);
     check(ha[0] == "harvest" && ha[1] == "/p/s.clap" && has(ha, "--continue") && !has(ha, "--all-methods") && has_pair(ha, "--max", "20"), "forms: harvest has the plugin positionally");
+    const Form* capture = find_form("capture");
+    check(capture != nullptr && capture->command == "capture", "forms: a Capture form exists");
+    if (capture) {
+        Values c;
+        c["capture.plugin"] = "/p/s.vst3";
+        c["capture.auto"] = "1";
+        const auto ca = build_args(*capture, c);
+        check(ca[0] == "capture" && ca[1] == "/p/s.vst3" && has(ca, "--auto"), "forms: capture has the plugin positionally");
+    }
+    check(is_harvest_like("capture") && is_harvest_like("harvest") && !is_harvest_like("fit"), "run model: capture reports presets like harvest");
     const auto hr = build_resume_args(*harvest, "", h);
     check(has(hr, "--continue") && hr[1] == "/p/s.clap", "forms: a harvest resumes with --continue");
     h["harvest.continue"] = "";

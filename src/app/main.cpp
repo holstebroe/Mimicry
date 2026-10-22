@@ -60,6 +60,7 @@ constexpr Command kCommands[] = {
     {"probe", "probe <plugin>", "sensitivity, safe range and hazard probe; writes the plugin profile"},
     {"fit", "fit --plugin P --wav T.wav", "match a WAV"},
     {"harvest", "harvest <plugin>", "collect the plugin's presets as verified states (preset library)"},
+    {"capture", "capture <plugin>", "open the plugin's window and capture the presets you pick (Windows)"},
     {"transfer", "transfer --source A --target B", "match the source plugin's presets in another plugin (any format mix)"},
     {"runs", "runs", "list the run directories with status (resumable runs)"},
     {"cancel", "cancel <run dir>", "ask a running fit or transfer to stop and keep a checkpoint"},
@@ -109,6 +110,11 @@ transfer options (fit options apply per preset; --minutes defaults to 5 per pres
   --from F,G / --method M   harvest options for that on-demand harvest      --no-harvest   never harvest
   --preset NAME|N,...  only these presets      --max N   the first N presets      --total-minutes T   overall cap
   --note C3 --gate MS --velocity V   the note both plugins play                 --resume RUN
+
+capture options (Windows; the plugin's own window, for presets only its browser reaches):
+  --auto               replay the taught "next preset" click from the profile until the bank wraps
+  --max N              stop after N ok presets      --wait-ms MS   wait after each click (default 400)
+  --continue           keep the captures of an earlier session   --out DIR / --profiles DIR as for harvest
 
 harvest options:
   --from F,G           preset files or folders (.state, .vstpreset; --raw-files: any file as state)
@@ -315,7 +321,7 @@ int main(int argc, char** argv) {
     Console& console = Console::get();
     console.set_events(args.has("--events"));
     // Only the commands that poll the cancel flag take over SIGINT/SIGTERM; the rest keep the default.
-    if (cmd == "fit" || cmd == "transfer" || cmd == "harvest") console.install_signal_handlers();
+    if (cmd == "fit" || cmd == "transfer" || cmd == "harvest" || cmd == "capture") console.install_signal_handlers();
     if (console.events()) console.start_stdin_watcher(args.has("--cancel-on-eof"));
     if (cmd == "fit") return cmd_fit(args);
     if (cmd == "eval") return cmd_eval(args);
@@ -327,6 +333,7 @@ int main(int argc, char** argv) {
     if (cmd == "fingerprint") return cmd_fingerprint(args);
     if (cmd == "replay") return cmd_replay(args);
     if (cmd == "harvest") return mimicry::app::cmd_harvest(args);
+    if (cmd == "capture") return mimicry::app::cmd_capture(args);
     for (const auto& c : kCommands)
         if (c.name == cmd) return not_implemented(cmd);
     std::fputs(std::format("mimicry: unknown command '{}' (try --help)\n", cmd).c_str(), stderr);

@@ -144,6 +144,23 @@ std::vector<Form> make_forms() {
     }
     out.push_back(harvest);
 
+    Form capture;
+    capture.id = "capture";
+    capture.title = "Capture presets";
+    capture.command = "capture";
+    capture.resumable = false;
+    capture.blurb = "For plugins that keep presets in their own browser or behind a login: the plugin's window opens, you pick presets "
+                    "and press Capture, or teach the \"next preset\" click once and let Auto-capture step through the bank.";
+    capture.fields = {plugin("capture.plugin", "Plugin", {}, "The plugin whose window is opened (Windows)."),
+                      check("capture.auto", "Auto-capture with the taught click", "--auto", false, "Uses the click stored in the plugin's profile.", true),
+                      check("capture.continue", "Keep earlier captures", "--continue", false, "Add to the library of an earlier capture.", false),
+                      number("capture.max", "Stop after N presets", "--max", "", "", true),
+                      number("capture.wait", "Wait after each click (ms)", "--wait-ms", "400", "", true),
+                      folder("capture.out", "Library folder", "--out", "presets", "", true),
+                      folder("capture.profiles", "Profiles folder", "--profiles", "profiles", "", true),
+                      extra("capture.extra")};
+    out.push_back(capture);
+
     Form probe;
     probe.id = "probe";
     probe.title = "Probe";
