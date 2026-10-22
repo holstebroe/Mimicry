@@ -167,6 +167,10 @@ void test_fit(const fs::path& dir, const std::string& plugin, bool vst3) {
     const std::string run = run_dir_of(ev);
     check(!run.empty() && fs::exists(fs::path(run) / "run.json"), "fit: the start event names the run directory");
     check(read_json(fs::path(run) / "run.json")["status"].as_string() == "running", "fit: run.json says running while it runs");
+    double evals_at_cancel = 0;
+    for (const auto& e : ev)
+        if (e["event"].as_string() == "progress") evals_at_cancel = e["evals"].as_number();
+    std::fprintf(stderr, "fit: cancel issued with %.0f evaluations seen so far\n", evals_at_cancel);
     check(run_cli(std::format("cancel \"{}\"", run), dir / "cancel.out", dir / "cancel.err") == 0, "mimicry cancel exits 0");
     bg.join();
     ev = read_events(bg.out);

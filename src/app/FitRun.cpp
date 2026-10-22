@@ -1,6 +1,7 @@
 #include "app/FitRun.hpp"
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cmath>
 #include <fstream>
@@ -193,7 +194,12 @@ FitOutcome run_fit(const FitSpec& sp) {
     out.time_cap_s = po.time_cap_s;
     const std::string table_msg = "the plugin changed its parameter table during the run";
     po.abort = [&p] { return p.pool && !p.pool->table_change().empty(); };
-    po.cancel = [] { return Console::get().cancel_requested(); };
+    po.cancel = [&con] {
+        if (!Console::get().cancel_requested()) return false;
+        static std::atomic<bool> announced{false};
+        if (!announced.exchange(true)) con.info("cancel requested: finishing the batch in flight, then saving");
+        return true;
+    };
     po.checkpoint = [&](const opt::PipelineState& st) {
         if (auto r = st.save(ckpt); !r) Console::get().warn(r.error());
     };
