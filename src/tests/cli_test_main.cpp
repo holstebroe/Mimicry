@@ -111,6 +111,11 @@ void dump(const fs::path& dir, const std::string& what, const std::string& run, 
         for (const auto& e : fs::directory_iterator(run, ec)) std::fprintf(stderr, "  %s\n", e.path().filename().string().c_str());
     for (const auto& f : files) {
         const std::string t = read_file(dir / f);
+        // Lines that mention the cancel, wherever they are in the output.
+        std::istringstream in(t);
+        for (std::string line; std::getline(in, line);)
+            if (line.find("cancel") != std::string::npos && line.find("\"event\":\"done\"") == std::string::npos)
+                std::fprintf(stderr, "  [%s] %s\n", f.string().c_str(), line.substr(0, 300).c_str());
         std::fprintf(stderr, "---- %s (%zu bytes, tail)\n%s\n", f.string().c_str(), t.size(), t.substr(t.size() > 1500 ? t.size() - 1500 : 0).c_str());
     }
 }
@@ -172,6 +177,9 @@ void test_fit(const fs::path& dir, const std::string& plugin, bool vst3) {
         if (e["event"].as_string() == "progress") evals_at_cancel = e["evals"].as_number();
     std::fprintf(stderr, "fit: cancel issued with %.0f evaluations seen so far\n", evals_at_cancel);
     check(run_cli(std::format("cancel \"{}\"", run), dir / "cancel.out", dir / "cancel.err") == 0, "mimicry cancel exits 0");
+    std::fprintf(stderr, "fit: cancel file exists right after the command: %d\n", int(fs::exists(fs::path(run) / "cancel")));
+    std::this_thread::sleep_for(std::chrono::seconds(3));
+    std::fprintf(stderr, "fit: 3 s later the run says: %s\n", bg.wait_for([](const json::Value& e) { return e["text"].as_string().find("cancel requested") != std::string::npos; }, 0.1) ? "cancel seen" : "nothing");
     bg.join();
     ev = read_events(bg.out);
     if (bg.rc != 4) dump(dir, "fit cancel", run, {"cancel.out", "cancel.err", "fit1.out", "fit1.err"});
