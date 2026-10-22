@@ -154,9 +154,9 @@ int main(int argc, char** argv) {
             const fs::path root = dir / "cancelled";
             auto lib = targets::write_library(root, *part, inst.info(), inst.parameters(), [&](std::uint32_t id, double u) { return inst.value_text(id, u); });
             check(lib.has_value(), "harvest: the partial library is written");
-            auto index = lib ? json::parse(read_file(*lib / "index.json")) : expected<json::Value, std::string>(unexpected(std::string("no library")));
+            auto index = lib ? json::parse(read_file(*lib / "index.json")) : expected<json::Value, std::string>(mimicry::unexpected(std::string("no library")));
             check(index && (*index)["cancelled"].as_bool(), "harvest: index.json says cancelled");
-            auto prior = lib ? targets::load_library(*lib) : expected<std::vector<targets::HarvestEntry>, std::string>(unexpected(std::string("no library")));
+            auto prior = lib ? targets::load_library(*lib) : expected<std::vector<targets::HarvestEntry>, std::string>(mimicry::unexpected(std::string("no library")));
             check(prior && prior->size() == 3, "harvest: the library reads back");
             if (prior) {
                 auto c = base;
