@@ -412,6 +412,92 @@ expected<host::CapturedPreset, HostError> WorkerClient::apply_preset(const host:
     return cap;
 }
 
+expected<host::EditorSize, HostError> WorkerClient::editor_open(const std::string& title, const json::Value& click) {
+    if (!open_) {
+        if (auto r = start_worker(); !r) return unexpected(r.error());
+    }
+    json::Value req, reply;
+    req.set("cmd", "editor_open").set("title", title);
+    if (click.is_object()) req.set("click", click);
+    std::string detail;
+    if (call(req, options_.open_timeout_s, reply, detail) != Call::Ok) {
+        open_ = false;
+        return unexpected(HostError{"worker lost while opening the editor: " + detail});
+    }
+    if (!reply["ok"].as_bool()) return unexpected(HostError{reply["error"].as_string()});
+    host::EditorSize size;
+    size.width = static_cast<int>(reply["width"].as_number());
+    size.height = static_cast<int>(reply["height"].as_number());
+    size.resizable = reply["resizable"].as_bool();
+    return size;
+}
+
+expected<WorkerClient::EditorStatus, HostError> WorkerClient::editor_poll() {
+    if (!open_) return unexpected(HostError{"no worker"});
+    json::Value req, reply;
+    req.set("cmd", "editor_poll");
+    std::string detail;
+    if (call(req, options_.call_timeout_s, reply, detail) != Call::Ok) {
+        open_ = false;
+        return unexpected(HostError{"the worker was lost during the editor session: " + detail});
+    }
+    if (!reply["ok"].as_bool()) return unexpected(HostError{reply["error"].as_string()});
+    EditorStatus st;
+    st.open = reply["open"].as_bool();
+    st.teaching = reply["teaching"].as_bool();
+    st.taught = reply["taught"].as_bool();
+    st.auto_running = reply["auto_running"].as_bool();
+    st.captures = static_cast<int>(reply["captures"].as_number());
+    st.signals = static_cast<int>(reply["signals"].as_number());
+    st.click = reply["click"];
+    for (const auto& e : reply["events"].as_array()) st.events.push_back(e.as_string());
+    return st;
+}
+
+expected<host::CapturedPreset, HostError> WorkerClient::editor_take(int index, std::string* hash) {
+    if (!open_) return unexpected(HostError{"no worker"});
+    json::Value req, reply;
+    req.set("cmd", "editor_take").set("index", index);
+    std::string detail;
+    if (call(req, options_.call_timeout_s, reply, detail) != Call::Ok) {
+        open_ = false;
+        return unexpected(HostError{"the worker was lost during the editor session: " + detail});
+    }
+    if (!reply["ok"].as_bool()) return unexpected(HostError{reply["error"].as_string()});
+    const auto n = static_cast<std::size_t>(reply["bytes"].as_number());
+    if (n > payload()) return unexpected(HostError{"bad state size"});
+    host::CapturedPreset cap;
+    const auto* p = static_cast<const std::uint8_t*>(shm_.data());
+    cap.state.assign(p, p + n);
+    for (const auto& c : reply["coords"].as_array()) cap.coords.push_back(c.as_number());
+    cap.name = reply["name"].as_string();
+    if (hash) *hash = reply["hash"].as_string();
+    if (cap.coords.size() != params_.size()) return unexpected(HostError{"the worker returned a different parameter count"});
+    return cap;
+}
+
+expected<void, HostError> WorkerClient::editor_action(const std::string& action, const json::Value& options) {
+    if (!open_) return unexpected(HostError{"no worker"});
+    json::Value req, reply;
+    req.set("cmd", "editor_action").set("action", action);
+    for (const auto& [k, v] : options.as_object()) req.set(k, v);
+    std::string detail;
+    if (call(req, options_.call_timeout_s, reply, detail) != Call::Ok) {
+        open_ = false;
+        return unexpected(HostError{"the worker was lost during the editor session: " + detail});
+    }
+    if (!reply["ok"].as_bool()) return unexpected(HostError{reply["error"].as_string()});
+    return {};
+}
+
+void WorkerClient::editor_close() {
+    if (!open_) return;
+    json::Value req, reply;
+    req.set("cmd", "editor_close");
+    std::string detail;
+    (void)call(req, options_.call_timeout_s, reply, detail);
+}
+
 expected<void, HostError> WorkerClient::reset() {
     if (!open_) return start_worker();
     json::Value req, reply;
@@ -423,6 +509,29 @@ expected<void, HostError> WorkerClient::reset() {
     }
     if (!reply["ok"].as_bool()) return unexpected(HostError{reply["error"].as_string()});
     return {};
+}
+
+expected<void, HostError> WorkerClient::open_editor() {
+    if (!open_) {
+        if (auto r = start_worker(); !r) return r;
+    }
+    json::Value req, reply;
+    req.set("cmd", "open_editor");
+    std::string detail;
+    if (call(req, options_.call_timeout_s, reply, detail) != Call::Ok) {
+        open_ = false;
+        return unexpected(HostError{"worker lost while opening the editor: " + detail});
+    }
+    if (!reply["ok"].as_bool()) return unexpected(HostError{reply["error"].as_string()});
+    return {};
+}
+
+void WorkerClient::close_editor() {
+    if (!open_) return;
+    json::Value req, reply;
+    req.set("cmd", "close_editor");
+    std::string detail;
+    if (call(req, options_.call_timeout_s, reply, detail) != Call::Ok) open_ = false;
 }
 
 }  // namespace mimicry::supervisor

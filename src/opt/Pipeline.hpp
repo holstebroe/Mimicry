@@ -13,6 +13,7 @@
 #include <string>
 #include <vector>
 
+#include "opt/Checkpoint.hpp"
 #include "opt/Constraints.hpp"
 #include "opt/Objective.hpp"
 #include "opt/Space.hpp"
@@ -23,7 +24,10 @@ struct Progress {
     std::string stage;
     long evals = 0;
     double best = 0;       // best fitness so far (loss + penalties)
-    double seconds = 0;
+    double seconds = 0;    // run time, including earlier sessions of a resumed run
+    // The best candidate so far (valid during the callback): its full vector and level gain, for a live A/B.
+    const std::vector<double>* best_coords = nullptr;
+    double best_gain_db = 0;
 };
 
 struct PipelineOptions {
@@ -58,11 +62,24 @@ struct PipelineOptions {
     // Polled between batches; true stops the run at once (e.g. the plugin's parameter table changed,
     // spec 05 section 9). The result is then marked `aborted`.
     std::function<bool()> abort;
+    // Polled with `abort`; true is a request from the user (spec 04 section 10): the run stops at the next
+    // batch, keeps what it has, and the result carries a checkpoint to continue from. Marked `cancelled`.
+    std::function<bool()> cancel;
+    // Called at the end of every finished stage and every `checkpoint_interval_s` of run time with the state a
+    // later run resumes from (`resume`); the caller stores it.
+    std::function<void(const PipelineState&)> checkpoint;
+    double checkpoint_interval_s = 60;
+    // Continue a stopped run: stages in `done` are skipped, the best point and the S1 / finalist points are
+    // re-scored and taken over, `time_cap_s` and `max_evals` count the earlier sessions too.
+    const PipelineState* resume = nullptr;
     std::vector<int> stages;      // empty = all of 1..7 (--stages)
     std::uint64_t seed = 1;
     double progress_interval_s = 15;  // [S]
     std::function<void(const Progress&)> progress;
     std::function<void(const std::string&)> log;
+    // A stage began (finished = false, `report` holds its name, free count and starting loss) or ended
+    // (finished = true, `report` complete). For progress displays.
+    std::function<void(const StageReport& report, bool finished)> on_stage;
 };
 
 struct Candidate {
@@ -78,14 +95,6 @@ struct FailureExample {
     Outcome outcome = Outcome::Crash;
     std::vector<std::size_t> minimal; // S from the bisection (parameter indices), empty when not bisected
     std::vector<double> threshold;    // per entry of `minimal`
-};
-
-struct StageReport {
-    std::string name;
-    int free = 0;            // parameters searched
-    double before = 0, after = 0;  // best loss (dB) before and after
-    long evals = 0;
-    double seconds = 0;
 };
 
 struct PipelineResult {
@@ -104,6 +113,8 @@ struct PipelineResult {
     std::vector<Constraint> learned;  // constraints found by this run's bisections
     std::vector<FailureExample> failures;
     bool aborted = false;             // options.abort stopped the run
+    bool cancelled = false;           // options.cancel stopped the run; `state` resumes it
+    PipelineState state;              // the final checkpoint (also written by a run that finished)
 };
 
 // `seeds` are extra full vectors for S1 (fingerprint neighbours, a warm start).

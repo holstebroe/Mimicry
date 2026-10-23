@@ -27,6 +27,7 @@ constexpr std::pair<PresetMethod, std::string_view> kPresetMethods[] = {
     {PresetMethod::ProgramList, "program-list"},
     {PresetMethod::MidiProgram, "midi-program"},
     {PresetMethod::ProgramParam, "program-param"},
+    {PresetMethod::Capture, "capture"},
 };
 }  // namespace
 

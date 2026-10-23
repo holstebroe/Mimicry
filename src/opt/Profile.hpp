@@ -63,6 +63,7 @@ struct HarvestRecipe {
     int count = 0;               // programs the method offered
     int found = 0;               // presets it yielded (ok)
     double wait_ms = 200;        // settle / wait after each load
+    json::Value click;           // capture: the taught "next preset" click (fx, fy, class), else null
     [[nodiscard]] json::Value to_json() const;
     [[nodiscard]] static expected<HarvestRecipe, std::string> from_json(const json::Value& v);
 };

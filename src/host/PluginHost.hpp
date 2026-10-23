@@ -9,6 +9,7 @@
 #include <array>
 #include <cstdint>
 #include <filesystem>
+#include <functional>
 #include <memory>
 #include <optional>
 #include <string>
@@ -107,9 +108,21 @@ enum class PresetMethod {
     ProgramList,   // VST3 IUnitInfo program list through its program-change parameter
     MidiProgram,   // MIDI program change (CLAP, note port with the MIDI dialect)
     ProgramParam,  // heuristic: a stepped parameter named Program / Preset / Patch, or a bare program-change parameter
+    Capture,       // picked by the user (or a taught click) in the plugin's own editor (06 section 6)
 };
 [[nodiscard]] std::string_view to_string(PresetMethod method) noexcept;
 [[nodiscard]] std::optional<PresetMethod> parse_preset_method(std::string_view text) noexcept;
+
+// The plugin's own editor (Windows only, docs/spec/02_HOSTING.md section 3): hosted in a window of the worker, for
+// manual capture (06 section 6). `parent` is the HWND the plugin attaches to.
+struct EditorSize {
+    int width = 0, height = 0;
+    bool resizable = false;
+};
+struct EditorEvents {
+    std::function<void(int width, int height)> resize;  // the plugin asks for this client size
+    std::function<void()> closed;                       // the plugin closed its own view
+};
 
 // One preset a plugin offers or a file holds. Which fields count depends on the method.
 struct PresetRef {
@@ -174,6 +187,32 @@ public:
     // its clean state afterwards, so later renders are unaffected. Only harvest-type jobs call this (05
     // section 9), never a fit.
     [[nodiscard]] virtual expected<CapturedPreset, HostError> apply_preset(const PresetRef& ref, double wait_ms = 200) = 0;
+
+    // Editor and manual capture (Windows, main thread; other platforms and the supervisor's WorkerClient answer
+    // with an error). The editor attaches to `parent_window` (an HWND); `editor_resized` tells the plugin the
+    // window was resized by the user.
+    [[nodiscard]] virtual expected<EditorSize, HostError> open_editor(void* /*parent_window*/, EditorEvents /*events*/) {
+        return unexpected(HostError{"plugin editors are hosted on Windows only"});
+    }
+    virtual void editor_resized(int /*width*/, int /*height*/) {}
+    virtual void close_editor() {}
+    // The plugin's state and every parameter as they are right now, after the user's edits in the editor: no
+    // reset, no reload, the editor session goes on. `name` is kept in the result.
+    [[nodiscard]] virtual expected<CapturedPreset, HostError> capture_current(const std::string& /*name*/) {
+        return unexpected(HostError{"capture needs an in-process instance with an editor"});
+    }
+    // How many preset-change signals the plugin gave since the last call (CLAP preset-load `loaded`, a VST3
+    // restart with changed values or edits): for watch mode (06 section 6).
+    [[nodiscard]] virtual int take_change_signals() { return 0; }
+    // The plugin's own editor in a top-level window, so the user can sign in or dismiss a dialog before a run
+    // (spec 02 section 3). Windows only; elsewhere an error. The window lives on the main thread and is
+    // serviced by `pump()` (the worker pumps while it waits for commands). Closing the window, or
+    // `close_editor()` (also the end of a capture session), ends it; renders do not need it closed.
+    [[nodiscard]] virtual expected<void, HostError> open_editor() {
+        return unexpected(HostError{"the plugin editor can only be shown on Windows"});
+    }
+    // True while the editor window is open.
+    [[nodiscard]] virtual bool editor_open() const { return false; }
 };
 
 // Opens a plugin by path (format from the extension) in THIS process. `uid` picks one plugin of a

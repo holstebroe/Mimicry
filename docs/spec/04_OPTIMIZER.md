@@ -206,3 +206,24 @@ and `src/opt` use these [D] unless noted:
 - **Fingerprint file:** `profiles/<format>-<uid>-<version hash>.fingerprint`, magic `MIMFPDB1`, a JSON header
   line (ids, names, counts), then float32 rows of coordinates and embedding. A database is used only for
   the exact parameter table (ids and names) it was built for; S1 adds the 8 nearest neighbours.
+
+## 10. Cancel, checkpoint and resume (WP6.8)
+
+`PipelineOptions::cancel` is polled with `abort` between batches (`global_stop`): the run ends at the next
+batch boundary, keeps its best point, skips the top-K selection (which needs re-renders) and returns
+`cancelled = true` with a `PipelineState` (`opt/Checkpoint`). `PipelineOptions::checkpoint` is called at the
+end of every stage that ran to its own end, every `checkpoint_interval_s` (60 s) and once more at the end of
+the run; the command line stores it as `checkpoint.json` (spec 09 §3).
+
+**What is stored** [A]: the stages that finished (1 = S1, 2-4 = group stages, 5 = S5, 6, 7), the best vector,
+the S1 start points (`kept`) and the finalists as full vectors, run time, evaluations, the outcome counts, the
+learned-constraint counters and the stage reports. A stage cut short by the time cap, the budget or a cancel is
+not marked finished. **Not stored**: CMA-ES mean, step size and covariance, the render cache, the surrogate's
+archive; an interrupted stage starts again from the best point, which costs the progress of that one stage at
+most [D].
+
+**Resume** (`PipelineOptions::resume`): run time starts at the stored value, so `time_cap_s`, `patience` and
+`max_evals` bound the whole run; the defaults, the given seeds, the best vector, the stored `kept` points and
+the finalists are rendered and scored first (each one render, and they refill `kept` and the finalist set),
+finished stages are skipped, the random seed is shifted by the session count so a resumed search does not repeat
+the previous samples. Learned hazard constraints are in the plugin profile and are loaded as usual.

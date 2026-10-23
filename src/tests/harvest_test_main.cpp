@@ -19,6 +19,7 @@
 #include "core/Json.hpp"
 #include "supervisor/WorkerClient.hpp"
 #include "targets/Harvest.hpp"
+#include "targets/Tones.hpp"
 #include "tests/test_synth/TestSynthCore.hpp"
 
 namespace {
@@ -84,7 +85,16 @@ std::string read_file(const fs::path& p) {
 
 }  // namespace
 
+void check_name_guess() {
+    auto blob = [](const std::string& s) { return std::vector<std::uint8_t>(s.begin(), s.end()); };
+    check(targets::guess_preset_name(blob(std::string("xx\0displayName\0\x01\x12\x05" "Brass In The USA\0name\0", 40))) == "Brass In The USA", "name guess: JUCE tree");
+    check(targets::guess_preset_name(blob(std::string("presetName\0\x01\x20\x05" "A name that is thirty chars long\0", 52))) == "A name that is thirty chars long", "name guess: a printable length byte");
+    check(targets::guess_preset_name(blob("noname \x01\x02\x03")).empty(), "name guess: nothing found");
+    check(targets::guess_preset_name({}).empty(), "name guess: empty state");
+}
+
 int main(int argc, char** argv) {
+    check_name_guess();
     if (argc < 3) {
         std::fputs("usage: mimicry_harvest_test <plugin> <mimicry_worker> [<mimicry>]\n", stderr);
         return 2;
@@ -106,6 +116,7 @@ int main(int argc, char** argv) {
 
     targets::HarvestOptions base;
     base.standard_folders = false;
+    base.verify_reproducible = true;
 
     // The bank, per method: CLAP preset discovery and MIDI program change; VST3 the program list.
     const std::vector<PresetMethod> methods = clap ? std::vector{PresetMethod::ClapPreset, PresetMethod::MidiProgram}
@@ -138,6 +149,55 @@ int main(int argc, char** argv) {
         auto rr = targets::harvest(inst, o);
         check(rr && rr->methods.size() == 1 && rr->methods.front().method == PresetMethod::ProgramParam && rr->ok_count() == 3,
               "a recipe's method goes first (program parameter: programs 1-3 ok)");
+    }
+
+    // Cancel in the middle of a method, write the library, continue from it (spec 09 section 3): the numbers
+    // and the outcomes equal those of an uninterrupted harvest, and nothing is tried twice.
+    if (first) {
+        auto o = base;
+        o.method = methods.front();
+        int seen = 0;
+        o.progress = [&](const targets::HarvestEntry&) { ++seen; };
+        o.cancel = [&] { return seen >= 3; };
+        auto part = targets::harvest(inst, o);
+        check(part && part->cancelled && part->entries.size() == 3 && part->methods.front().note == "cancelled", "harvest: cancelled after three presets");
+        if (part) {
+            const fs::path root = dir / "cancelled";
+            auto lib = targets::write_library(root, *part, inst.info(), inst.parameters(), [&](std::uint32_t id, double u) { return inst.value_text(id, u); });
+            check(lib.has_value(), "harvest: the partial library is written");
+            auto index = lib ? json::parse(read_file(*lib / "index.json")) : expected<json::Value, std::string>(mimicry::unexpected(std::string("no library")));
+            check(index && (*index)["cancelled"].as_bool(), "harvest: index.json says cancelled");
+            auto prior = lib ? targets::load_library(*lib) : expected<std::vector<targets::HarvestEntry>, std::string>(mimicry::unexpected(std::string("no library")));
+            check(prior && prior->size() == 3, "harvest: the library reads back");
+            if (prior) {
+                auto c = base;
+                c.method = methods.front();
+                c.prior = *prior;
+                int tried_again = 0;
+                c.progress = [&](const targets::HarvestEntry&) { ++tried_again; };
+                auto rest = targets::harvest(inst, c);
+                check(rest && !rest->cancelled && rest->entries.size() == first->entries.size() && rest->ok_count() == first->ok_count(),
+                      std::format("harvest: the continued harvest has the full bank ({} entries, {} ok)", rest ? rest->entries.size() : 0, rest ? rest->ok_count() : 0));
+                check(tried_again == int(first->entries.size()) - 3, "harvest: only the presets not yet tried are loaded");
+                if (rest) {
+                    bool same = rest->entries.size() == first->entries.size();
+                    for (std::size_t i = 0; same && i < rest->entries.size(); ++i)
+                        same = rest->entries[i].outcome == first->entries[i].outcome && rest->entries[i].number == first->entries[i].number &&
+                               rest->entries[i].state_hash == first->entries[i].state_hash;
+                    check(same, "harvest: outcomes, numbers and states equal an uninterrupted harvest");
+                    check(rest->methods.front().resumed == 3 && rest->recipe && rest->recipe->method == methods.front(), "harvest: the report counts the taken-over presets, the recipe is kept");
+                    auto lib2 = targets::write_library(root, *rest, inst.info(), inst.parameters(), [&](std::uint32_t id, double u) { return inst.value_text(id, u); });
+                    check(lib2.has_value(), "harvest: the completed library is written over the partial one");
+                    if (lib2) {
+                        int states = 0;
+                        for (const auto& e : fs::directory_iterator(*lib2)) states += e.path().extension() == ".state";
+                        check(states == rest->ok_count(), std::format("harvest: one state file per ok preset after the continue ({})", states));
+                        auto again = targets::load_library(*lib2);
+                        check(again && again->size() == first->entries.size(), "harvest: the completed library reads back whole");
+                    }
+                }
+            }
+        }
     }
 
     // The library on disk, and its states read back as file presets (ladder step 1).
@@ -188,6 +248,55 @@ int main(int argc, char** argv) {
         const std::string second = read_file(dir / "run2.txt");
         check(second.find("using the recipe") != std::string::npos, "the second harvest uses the stored recipe");
         check(second.find("4 presets in") != std::string::npos, "the second harvest finds the bank again");
+    }
+
+    // Tone harvest (06 section 6a): consensus pick, note end detection, and the command over the library.
+    {
+        auto emb = [](float v) {
+            opt::Embedding e(opt::kEmbeddingDims, 0.0f);
+            e[0] = v;
+            e[opt::kEmbeddingLevel] = 0;
+            return e;
+        };
+        // Takes at 0, 1, 1.2, 5, and an invalid one at 100: the medoid is a take near the cluster, not the outlier.
+        const auto c = targets::pick_consensus({emb(0), emb(1), emb(1.2f), emb(5), emb(100)}, {true, true, true, true, false});
+        check(c.index == 1 || c.index == 2, "consensus: medoid of the valid takes: " + std::to_string(c.index));
+        check(c.mean_distance[4] == 0, "consensus: an invalid take has no distance");
+        check(targets::pick_consensus({emb(0)}, {false}).index == -1, "consensus: no valid take, no choice");
+        auto lv = emb(0), lv2 = emb(0);
+        lv2[opt::kEmbeddingLevel] = 9;  // same spectrum, louder: still a difference
+        check(targets::pick_consensus({lv, lv2}, {true, true}).spread >= 9.0, "consensus: level differences count");
+
+        host::Audio au;
+        au.sample_rate = 1000;
+        au.channels = 2;
+        au.samples.assign(2 * 1000, 0.0f);
+        for (int f = 100; f < 400; ++f) au.samples[2 * f] = 0.1f;  // note until 0.4 s
+        const std::size_t end = targets::note_end_frame(au, -60);
+        check(end >= 400 && end <= 410, "note end near 400 ms: " + std::to_string(end));
+        check(targets::note_end_frame(host::Audio{1000, 2, std::vector<float>(2000, 0.0f)}, -60) == 0, "silence has no note end");
+        check(targets::tone_stem(48, 100) == "C3_v100" && targets::tone_stem(61, 7) == "Cs4_v7", "tone stem names");
+    }
+    if (argc > 3) {
+        const fs::path lib = dir / "cli";
+        fs::path library;
+        for (const auto& d : fs::directory_iterator(lib))
+            if (d.is_directory()) library = d.path();
+        check(!library.empty() && targets::list_library(library).has_value() && targets::list_library(library)->size() == 4,
+              "list_library reads the four ok presets from index.json");
+        const std::string args = std::format("tones \"{}\" --presets \"{}\" --out \"{}\" --profiles \"{}\" --notes C3,C4 --velocities 60,120 --takes 3 --start",
+                                             plugin, library.string(), (dir / "tones").string(), (dir / "profiles").string());
+        check(run_cli(argv[3], args, dir / "tones.txt") == 0, "mimicry tones exits 0: " + read_file(dir / "tones.txt"));
+        int wavs = 0;
+        for (const auto& d : fs::recursive_directory_iterator(dir / "tones"))
+            if (d.path().extension() == ".wav") ++wavs;
+        check(wavs == 4 * 2 * 2, "tones: one WAV per preset, note and velocity: " + std::to_string(wavs));
+        bool layout = false;  // <tones>/<NNN-preset>/<note>_v<velocity>.wav (preset names depend on the format)
+        for (const auto& d : fs::directory_iterator(dir / "tones"))
+            layout = layout || (d.is_directory() && d.path().filename().string().rfind("001-", 0) == 0 && fs::exists(d.path() / "C4_v120.wav"));
+        check(layout, "tones: folder per preset, file per pitch and velocity");
+        auto m = json::parse(read_file(dir / "tones" / "tones.json"));
+        check(m && (*m)["tones"].as_array().size() == 16, "tones: manifest lists every combination");
     }
 
     fs::remove_all(dir);

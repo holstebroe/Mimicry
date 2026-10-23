@@ -173,6 +173,7 @@ json::Value HarvestRecipe::to_json() const {
     json::Value v;
     v.set("method", std::string(host::to_string(method))).set("param_id", param_id).set("list_id", list_id)
         .set("count", count).set("found", found).set("wait_ms", wait_ms);
+    if (click.is_object()) v.set("click", click);
     return v;
 }
 
@@ -186,6 +187,7 @@ expected<HarvestRecipe, std::string> HarvestRecipe::from_json(const json::Value&
     r.count = static_cast<int>(v["count"].as_number());
     r.found = static_cast<int>(v["found"].as_number());
     r.wait_ms = v["wait_ms"].as_number(200);
+    if (v["click"].is_object()) r.click = v["click"];
     return r;
 }
 
