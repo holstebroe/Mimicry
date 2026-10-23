@@ -18,7 +18,7 @@ namespace fs = std::filesystem;
 namespace {
 
 constexpr std::string_view kFlags[] = {"--no-isolation", "--no-prior", "--no-pairs", "--solve-gain", "--isolated",
-                                       "--all-methods", "--verify-repro", "--raw-files", "--no-recipe", "--events", "--cancel-on-eof",
+                                       "--all-methods", "--keep-takes", "--editor", "--start", "--verify-repro", "--raw-files", "--no-recipe", "--events", "--cancel-on-eof",
                                        "--continue", "--json", "--no-harvest"};
 
 }  // namespace

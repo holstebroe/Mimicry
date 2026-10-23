@@ -251,6 +251,49 @@ report (number, name, method, index, outcome, duplicate of, difference, params r
 message), the per-method summary and the recipe in `index.json`; a re-harvest into the same folder first
 removes the files the previous `index.json` listed, and nothing else.
 
+## 6a. Tone harvest (`mimicry tones`) [A]
+
+Training tones for the optimiser: for each preset of a harvest library, a small grid of pitches and
+velocities, each reduced to one consensus tone. The optimiser then fits the same source plugin to that tone
+(the preset's own state is the known answer).
+
+Flow: the user names the library folder (`--presets`, the `mimicry harvest` output: `index.json` and
+`.state` files, or any folder of `.state` files) and the plugin. With `--editor` (Windows, 02 §3) the plugin's
+own window opens in the worker so the user can sign in or dismiss a dialog; pressing Enter in the console
+starts the run and closes the window. Without `--editor` the run starts at Enter (`--start` skips the
+prompt). Renders reset the plugin, they do not restart it, so a session held in the worker's memory survives;
+with `--editor` the worker is not recycled [D]. A crashed or hung worker loses that session.
+
+**GUI host** (`mimicry_tones_gui`, Windows only, plain Win32, `src/gui/GuiMain.cpp`): the same run from a window, for plugins
+that must be activated by hand. Fields for the plugin, the preset folder, the output folder, notes, velocities
+and takes. "Open plugin window" loads the plugin in a worker and shows its editor (02 §3); the user activates or
+signs in; "Start" closes the editor and calls `targets::run_tones` (the code behind `mimicry tones`) on a
+background thread, with a progress bar, a log of every combination and a Stop button (checked between
+combinations; the manifest still lists what was done). The worker is never recycled, so an in-memory session
+survives the whole run [D]. Untested on a real plugin (OQ12).
+
+Per preset × pitch × velocity (`--notes`, default C2,C3,C4 [D]; `--velocities`, default 50,110 [D]):
+`--takes` (5 [D]) renders, each from the complete state after a reset (CLAUDE.md rule 5): one note, held
+`--gate` ms (1000 [D]), then released and left to ring. A take **ends when the note has dropped below**
+`--end-db` (-60 dBFS peak in 10 ms windows [D]); the renderer stops earlier at -80 dB, and
+`--max-tail-ms` (8000 [D]) bounds the wait. A take is never shorter than the held note, and fades out over
+30 ms. Because every take is an offline render from a reset, there is no real-time pause between takes;
+variation comes from the plugin itself (random phase, free-running modulation, unison drift).
+
+**Consensus**: the medoid of the usable takes. The distance of two takes is the embedding distance (04 §7,
+level free) or the level difference in dB, whichever is larger; the take with the smallest summed distance
+to the others wins, ties to the earliest. A failed or silent take (peak below `--end-db` throughout) is
+recorded in the manifest with its reason and takes no part. The chosen take's mean distance to the others is
+its `spread`; above `--max-spread` (2.0 [D]) the tone is flagged `unstable` (still written, so the training
+can drop it or weigh it). A combination with no usable take is recorded with status `no usable take`.
+
+**Output**: `<out>/<preset stem>/<note>_v<velocity>.wav` (stem from the library, e.g. `003-Pluck/C3_v110.wav`;
+note names as `parse_note_name`, sharps as `Cs`), 32-bit float, as rendered (level is part of the target).
+`--keep-takes` also writes every take as `<note>_v<velocity>_take<N>.wav`. `<out>/tones.json` lists every
+combination: preset, note, velocity, the absolute paths of the preset's `.state` and `params.json`, the file,
+duration, chosen take, spread, status and the per-take outcome, level and distance. `--preset a,b` limits
+the run to library entries whose name contains one of the words.
+
 ## 7. Least-error transfer [A]
 
 The end goal of plugin-to-plugin work is to use the presets of one synth or effect on another with the

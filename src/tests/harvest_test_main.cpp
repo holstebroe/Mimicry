@@ -19,6 +19,7 @@
 #include "core/Json.hpp"
 #include "supervisor/WorkerClient.hpp"
 #include "targets/Harvest.hpp"
+#include "targets/Tones.hpp"
 #include "tests/test_synth/TestSynthCore.hpp"
 
 namespace {
@@ -247,6 +248,55 @@ int main(int argc, char** argv) {
         const std::string second = read_file(dir / "run2.txt");
         check(second.find("using the recipe") != std::string::npos, "the second harvest uses the stored recipe");
         check(second.find("4 presets in") != std::string::npos, "the second harvest finds the bank again");
+    }
+
+    // Tone harvest (06 section 6a): consensus pick, note end detection, and the command over the library.
+    {
+        auto emb = [](float v) {
+            opt::Embedding e(opt::kEmbeddingDims, 0.0f);
+            e[0] = v;
+            e[opt::kEmbeddingLevel] = 0;
+            return e;
+        };
+        // Takes at 0, 1, 1.2, 5, and an invalid one at 100: the medoid is a take near the cluster, not the outlier.
+        const auto c = targets::pick_consensus({emb(0), emb(1), emb(1.2f), emb(5), emb(100)}, {true, true, true, true, false});
+        check(c.index == 1 || c.index == 2, "consensus: medoid of the valid takes: " + std::to_string(c.index));
+        check(c.mean_distance[4] == 0, "consensus: an invalid take has no distance");
+        check(targets::pick_consensus({emb(0)}, {false}).index == -1, "consensus: no valid take, no choice");
+        auto lv = emb(0), lv2 = emb(0);
+        lv2[opt::kEmbeddingLevel] = 9;  // same spectrum, louder: still a difference
+        check(targets::pick_consensus({lv, lv2}, {true, true}).spread >= 9.0, "consensus: level differences count");
+
+        host::Audio au;
+        au.sample_rate = 1000;
+        au.channels = 2;
+        au.samples.assign(2 * 1000, 0.0f);
+        for (int f = 100; f < 400; ++f) au.samples[2 * f] = 0.1f;  // note until 0.4 s
+        const std::size_t end = targets::note_end_frame(au, -60);
+        check(end >= 400 && end <= 410, "note end near 400 ms: " + std::to_string(end));
+        check(targets::note_end_frame(host::Audio{1000, 2, std::vector<float>(2000, 0.0f)}, -60) == 0, "silence has no note end");
+        check(targets::tone_stem(48, 100) == "C3_v100" && targets::tone_stem(61, 7) == "Cs4_v7", "tone stem names");
+    }
+    if (argc > 3) {
+        const fs::path lib = dir / "cli";
+        fs::path library;
+        for (const auto& d : fs::directory_iterator(lib))
+            if (d.is_directory()) library = d.path();
+        check(!library.empty() && targets::list_library(library).has_value() && targets::list_library(library)->size() == 4,
+              "list_library reads the four ok presets from index.json");
+        const std::string args = std::format("tones \"{}\" --presets \"{}\" --out \"{}\" --profiles \"{}\" --notes C3,C4 --velocities 60,120 --takes 3 --start",
+                                             plugin, library.string(), (dir / "tones").string(), (dir / "profiles").string());
+        check(run_cli(argv[3], args, dir / "tones.txt") == 0, "mimicry tones exits 0: " + read_file(dir / "tones.txt"));
+        int wavs = 0;
+        for (const auto& d : fs::recursive_directory_iterator(dir / "tones"))
+            if (d.path().extension() == ".wav") ++wavs;
+        check(wavs == 4 * 2 * 2, "tones: one WAV per preset, note and velocity: " + std::to_string(wavs));
+        bool layout = false;  // <tones>/<NNN-preset>/<note>_v<velocity>.wav (preset names depend on the format)
+        for (const auto& d : fs::directory_iterator(dir / "tones"))
+            layout = layout || (d.is_directory() && d.path().filename().string().rfind("001-", 0) == 0 && fs::exists(d.path() / "C4_v120.wav"));
+        check(layout, "tones: folder per preset, file per pitch and velocity");
+        auto m = json::parse(read_file(dir / "tones" / "tones.json"));
+        check(m && (*m)["tones"].as_array().size() == 16, "tones: manifest lists every combination");
     }
 
     fs::remove_all(dir);

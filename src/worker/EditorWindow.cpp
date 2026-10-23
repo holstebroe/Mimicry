@@ -26,7 +26,7 @@ namespace mimicry::worker {
 
 namespace {
 
-constexpr wchar_t kFrameClass[] = L"MimicryEditorWindow";
+constexpr wchar_t kFrameClass[] = L"MimicryCaptureFrame";
 constexpr wchar_t kHostClass[] = L"MimicryEditorHost";
 enum : int { kIdName = 101, kIdCapture, kIdTeach, kIdAuto, kIdDone, kIdStatus };
 constexpr int kToolbar = 44;

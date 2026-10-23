@@ -204,6 +204,15 @@ public:
     // How many preset-change signals the plugin gave since the last call (CLAP preset-load `loaded`, a VST3
     // restart with changed values or edits): for watch mode (06 section 6).
     [[nodiscard]] virtual int take_change_signals() { return 0; }
+    // The plugin's own editor in a top-level window, so the user can sign in or dismiss a dialog before a run
+    // (spec 02 section 3). Windows only; elsewhere an error. The window lives on the main thread and is
+    // serviced by `pump()` (the worker pumps while it waits for commands). Closing the window, or
+    // `close_editor()` (also the end of a capture session), ends it; renders do not need it closed.
+    [[nodiscard]] virtual expected<void, HostError> open_editor() {
+        return unexpected(HostError{"the plugin editor can only be shown on Windows"});
+    }
+    // True while the editor window is open.
+    [[nodiscard]] virtual bool editor_open() const { return false; }
 };
 
 // Opens a plugin by path (format from the extension) in THIS process. `uid` picks one plugin of a

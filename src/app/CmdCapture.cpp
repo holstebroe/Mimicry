@@ -19,12 +19,12 @@ namespace mimicry::app {
 namespace fs = std::filesystem;
 
 int cmd_capture(const Args& a) {
-    Console& con = Console::get();
     if (a.positional.empty())
         return fail("capture", "usage: mimicry capture <plugin> [--auto] [--max N] [--wait-ms MS] [--continue] [--out DIR]");
 #ifndef _WIN32
     return fail("capture", "capturing from the plugin's window needs Windows (the editor is hosted in a Win32 window)");
 #else
+    Console& con = Console::get();
     const std::string path = a.positional[0];
     if (auto f = host::format_from_path(path); !f) return fail("capture", f.error());
     if (con.events()) {

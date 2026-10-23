@@ -511,4 +511,27 @@ expected<void, HostError> WorkerClient::reset() {
     return {};
 }
 
+expected<void, HostError> WorkerClient::open_editor() {
+    if (!open_) {
+        if (auto r = start_worker(); !r) return r;
+    }
+    json::Value req, reply;
+    req.set("cmd", "open_editor");
+    std::string detail;
+    if (call(req, options_.call_timeout_s, reply, detail) != Call::Ok) {
+        open_ = false;
+        return unexpected(HostError{"worker lost while opening the editor: " + detail});
+    }
+    if (!reply["ok"].as_bool()) return unexpected(HostError{reply["error"].as_string()});
+    return {};
+}
+
+void WorkerClient::close_editor() {
+    if (!open_) return;
+    json::Value req, reply;
+    req.set("cmd", "close_editor");
+    std::string detail;
+    if (call(req, options_.call_timeout_s, reply, detail) != Call::Ok) open_ = false;
+}
+
 }  // namespace mimicry::supervisor

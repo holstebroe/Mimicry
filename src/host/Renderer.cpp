@@ -1,5 +1,7 @@
 #include "host/Renderer.hpp"
 
+#include "host/EditorWindow.hpp"
+
 #include <algorithm>
 #include <atomic>
 #include <chrono>
@@ -151,6 +153,7 @@ void Renderer::pump() {
         engine_->pump_main_thread();
     } catch (...) {
     }
+    if (window_ && window_->closed_by_user()) close_editor();  // the user closed the window
 }
 
 expected<std::vector<std::uint8_t>, HostError> Renderer::save_state() {
@@ -181,6 +184,39 @@ expected<void, HostError> Renderer::restart_engine() {
 }
 
 expected<void, HostError> Renderer::reset() { return restart_engine(); }
+
+// The sign-in form of the editor: a top-level window of the host holding the plugin's editor, closed by its
+// close button (noticed in pump()) or close_editor().
+expected<void, HostError> Renderer::open_editor() {
+    if (window_ && window_->exists()) return {};
+    auto window = std::make_shared<EditorWindow>();
+    if (auto r = window->create(engine_->info().name, 800, 600); !r) return r;
+    EditorEvents ev;
+    std::weak_ptr<EditorWindow> weak = window;
+    ev.resize = [weak](int w, int h) {
+        if (auto win = weak.lock()) win->resize_client(w, h);
+    };
+    auto size = open_editor(window->handle(), std::move(ev));
+    if (!size) {
+        window->destroy();
+        return unexpected(size.error());
+    }
+    window->resize_client(size->width, size->height);
+    window->show();
+    window_ = std::move(window);
+    return {};
+}
+
+bool Renderer::editor_open() const { return window_ && window_->exists(); }
+
+void Renderer::close_editor() {
+    try {
+        engine_->close_editor();
+    } catch (...) {
+    }
+    if (window_) window_->destroy();
+    window_.reset();
+}
 
 expected<std::vector<PresetRef>, HostError> Renderer::presets() {
     std::vector<PresetRef> out;

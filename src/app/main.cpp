@@ -60,6 +60,7 @@ constexpr Command kCommands[] = {
     {"probe", "probe <plugin>", "sensitivity, safe range and hazard probe; writes the plugin profile"},
     {"fit", "fit --plugin P --wav T.wav", "match a WAV"},
     {"harvest", "harvest <plugin>", "collect the plugin's presets as verified states (preset library)"},
+    {"tones", "tones <plugin> --presets DIR", "play each harvested preset (pitches x velocities x takes), keep the consensus tone as a WAV"},
     {"capture", "capture <plugin>", "open the plugin's window and capture the presets you pick (Windows)"},
     {"transfer", "transfer --source A --target B", "match the source plugin's presets in another plugin (any format mix)"},
     {"runs", "runs", "list the run directories with status (resumable runs)"},
@@ -110,6 +111,15 @@ transfer options (fit options apply per preset; --minutes defaults to 5 per pres
   --from F,G / --method M   harvest options for that on-demand harvest      --no-harvest   never harvest
   --preset NAME|N,...  only these presets      --max N   the first N presets      --total-minutes T   overall cap
   --note C3 --gate MS --velocity V   the note both plugins play                 --resume RUN
+
+tones options:
+  --presets DIR        harvest library folder (index.json + .state files; required)
+  --notes C2,C3,C4     pitches (default)            --velocities 50,110   MIDI velocities (default)
+  --takes N (5)        --gate MS (1000) key held    --end-db -60   a note has ended when it stays below this
+  --max-tail-ms MS     longest decay waited for (8000)    --max-spread D   flag unstable tones (2.0)
+  --preset a,b         only presets whose name contains one of these    --keep-takes   also write every take
+  --editor             open the plugin's own window first (Windows), press Enter there to start
+  --out DIR            tone root (default: tones)
 
 capture options (Windows; the plugin's own window, for presets only its browser reaches):
   --auto               replay the taught "next preset" click from the profile until the bank wraps
@@ -335,6 +345,7 @@ int main(int argc, char** argv) {
     if (cmd == "replay") return cmd_replay(args);
     if (cmd == "harvest") return mimicry::app::cmd_harvest(args);
     if (cmd == "capture") return mimicry::app::cmd_capture(args);
+    if (cmd == "tones") return mimicry::app::cmd_tones(args);
     for (const auto& c : kCommands)
         if (c.name == cmd) return not_implemented(cmd);
     std::fputs(std::format("mimicry: unknown command '{}' (try --help)\n", cmd).c_str(), stderr);
