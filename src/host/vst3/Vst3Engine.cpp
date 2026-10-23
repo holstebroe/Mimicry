@@ -19,6 +19,7 @@
 
 #include "base/source/fstring.h"
 #include "pluginterfaces/base/funknown.h"
+#include "pluginterfaces/gui/iplugview.h"
 #include "pluginterfaces/vst/ivstaudioprocessor.h"
 #include "pluginterfaces/vst/ivstcomponent.h"
 #include "pluginterfaces/vst/ivsteditcontroller.h"
@@ -34,6 +35,7 @@
 #include "public.sdk/source/vst/hosting/plugprovider.h"
 #include "public.sdk/source/vst/hosting/processdata.h"
 
+#include "host/EditorWindow.hpp"
 #include "host/Engine.hpp"
 #include "host/FileHash.hpp"
 #include "host/ParamUtil.hpp"
@@ -99,11 +101,35 @@ public:
     uint32 PLUGIN_API release() override { return 1; }
 };
 
+// The frame the plugin's view talks to: the editor window resizes when the plugin asks.
+class EditorFrame final : public IPlugFrame {
+public:
+    EditorWindow* window = nullptr;
+
+    tresult PLUGIN_API resizeView(IPlugView* view, ViewRect* rect) override {
+        if (!window || !rect) return kInvalidArgument;
+        window->resize_client(rect->getWidth(), rect->getHeight());
+        if (view) view->onSize(rect);  // the host tells the view the size it got
+        return kResultOk;
+    }
+    tresult PLUGIN_API queryInterface(const TUID iid, void** obj) override {
+        if (FUnknownPrivate::iidEqual(iid, IPlugFrame::iid) || FUnknownPrivate::iidEqual(iid, FUnknown::iid)) {
+            *obj = static_cast<IPlugFrame*>(this);
+            return kResultOk;
+        }
+        *obj = nullptr;
+        return kNoInterface;
+    }
+    uint32 PLUGIN_API addRef() override { return 1; }  // owned by the engine
+    uint32 PLUGIN_API release() override { return 1; }
+};
+
 class Vst3Engine final : public Engine {
 public:
     explicit Vst3Engine(std::shared_ptr<ThreadRoles> roles) : roles_(std::move(roles)) {}
 
     ~Vst3Engine() override {
+        close_editor();  // the view goes before the controller
         if (controller_) controller_->setComponentHandler(nullptr);
         data_.unprepare();
         // Every interface pointer goes before the module: one released after FreeLibrary calls into unloaded
@@ -567,8 +593,51 @@ private:
 
     std::shared_ptr<ThreadRoles> roles_;
     VST3::Hosting::Module::Ptr module_;
+    // The editor: IEditController::createView("editor") attached to a Win32 window (spec 02 section 3).
+    expected<void, HostError> open_editor() override {
+        if (view_) return {};
+        if (!controller_) return unexpected(HostError{"the plugin has no edit controller"});
+        view_ = owned(controller_->createView(ViewType::kEditor));
+        if (!view_) return unexpected(HostError{"the plugin has no editor"});
+        if (view_->isPlatformTypeSupported(kPlatformTypeHWND) != kResultTrue) {
+            view_ = nullptr;
+            return unexpected(HostError{"the plugin editor cannot be embedded in a Win32 window"});
+        }
+        ViewRect size{};
+        if (view_->getSize(&size) != kResultOk || size.getWidth() < 1 || size.getHeight() < 1) size = ViewRect(0, 0, 800, 600);
+        if (auto r = window_.create(info_.name, size.getWidth(), size.getHeight()); !r) {
+            view_ = nullptr;
+            return r;
+        }
+        frame_.window = &window_;
+        view_->setFrame(&frame_);
+        if (view_->attached(window_.handle(), kPlatformTypeHWND) != kResultOk) {
+            view_->setFrame(nullptr);
+            view_ = nullptr;
+            window_.destroy();
+            return unexpected(HostError{"the plugin editor did not attach to the window"});
+        }
+        window_.show();
+        return {};
+    }
+    void close_editor() override {
+        if (view_) {
+            view_->removed();
+            view_->setFrame(nullptr);
+            view_ = nullptr;
+        }
+        window_.destroy();
+    }
+    bool editor_open() const override { return view_ != nullptr && window_.exists(); }
+    void pump_main_thread() override {
+        if (view_ && window_.closed_by_user()) close_editor();  // the user closed the window
+    }
+
     HostApplication host_app_;
     Handler handler_;
+    EditorFrame frame_;
+    EditorWindow window_;
+    IPtr<IPlugView> view_;  // non-null while the editor is open
     IPtr<PlugProvider> provider_;
     IPtr<IComponent> component_;
     IPtr<IEditController> controller_;

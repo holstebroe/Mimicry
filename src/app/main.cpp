@@ -12,6 +12,7 @@
 #include <format>
 #include <fstream>
 #include <iostream>
+#include <limits>
 #include <map>
 #include <mutex>
 #include <optional>
@@ -739,7 +740,10 @@ int cmd_tones(const Args& a) {
         if (!r) return fail("tones", r.error().message);
         inst = std::move(*r);
     } else {
-        auto r = supervisor::WorkerClient::open(path);
+        // A plugin signed in through its window keeps the session in the worker's memory: no recycling then.
+        supervisor::WorkerOptions wo;
+        if (a.has("--editor")) wo.recycle_after = std::numeric_limits<int>::max();
+        auto r = supervisor::WorkerClient::open(path, {}, wo);
         if (!r) return fail("tones", r.error().message);
         inst = std::move(*r);
     }

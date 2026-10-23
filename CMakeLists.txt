@@ -73,6 +73,7 @@ mimicry_warnings(mimicry_features)
 
 add_library(mimicry_host STATIC
     src/host/Codec.cpp
+    src/host/EditorWindow.cpp
     src/host/FileHash.cpp
     src/host/MessagePump.cpp
     src/host/ParamUtil.cpp

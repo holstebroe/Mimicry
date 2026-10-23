@@ -16,6 +16,7 @@
 #include <thread>
 #include <unordered_map>
 
+#include "host/EditorWindow.hpp"
 #include "host/Engine.hpp"
 #include "host/FileHash.hpp"
 #include "host/ParamUtil.hpp"
@@ -49,6 +50,7 @@ public:
     }
 
     ~ClapEngine() override {
+        close_editor();  // the gui goes before the plugin
         if (plugin_) plugin_->destroy(plugin_);
         plugin_ = nullptr;
         if (entry_) entry_->deinit();
@@ -290,7 +292,48 @@ public:
 
     void pump_main_thread() override {
         if (callback_.exchange(false) && plugin_) plugin_->on_main_thread(plugin_);
+        if (gui_ && window_.closed_by_user()) close_editor();  // the user closed the window
     }
+
+    // The editor in a Win32 window: clap.gui, embedded in our window (spec 02 section 3). Windows only.
+    expected<void, HostError> open_editor() override {
+        if (gui_) return {};
+        const auto* gui = static_cast<const clap_plugin_gui_t*>(plugin_->get_extension(plugin_, CLAP_EXT_GUI));
+        if (!gui) return unexpected(HostError{"the plugin has no editor (no clap.gui)"});
+        if (!gui->is_api_supported(plugin_, CLAP_WINDOW_API_WIN32, false))
+            return unexpected(HostError{"the plugin editor cannot be embedded in a Win32 window"});
+        if (!gui->create(plugin_, CLAP_WINDOW_API_WIN32, false)) return unexpected(HostError{"the plugin could not create its editor"});
+        uint32_t w = 800, h = 600;
+        if (!gui->get_size(plugin_, &w, &h)) {
+            w = 800;
+            h = 600;
+        }
+        if (auto r = window_.create(info_.name, static_cast<int>(w), static_cast<int>(h)); !r) {
+            gui->destroy(plugin_);
+            return r;
+        }
+        clap_window_t parent{};
+        parent.api = CLAP_WINDOW_API_WIN32;
+        parent.win32 = window_.handle();
+        if (!gui->set_parent(plugin_, &parent)) {
+            window_.destroy();
+            gui->destroy(plugin_);
+            return unexpected(HostError{"the plugin editor did not accept the window"});
+        }
+        gui_ = gui;
+        gui_->show(plugin_);
+        window_.show();
+        return {};
+    }
+    void close_editor() override {
+        if (gui_) {
+            gui_->hide(plugin_);
+            gui_->destroy(plugin_);
+            gui_ = nullptr;
+        }
+        window_.destroy();
+    }
+    bool editor_open() const override { return gui_ != nullptr && window_.exists(); }
 
     expected<void, HostError> start() override {
         if (!plugin_->start_processing(plugin_)) return unexpected(HostError{"start_processing failed"});
@@ -637,6 +680,20 @@ private:
         if (!e->current_preset(location, key)) return;
         e->preset_pending_ = false;
     }
+    // clap.gui host side: the plugin asks for a different editor size.
+    static void gui_resize_hints_changed(const clap_host_t*) {}
+    static bool gui_request_resize(const clap_host_t* h, uint32_t w, uint32_t hh) {
+        auto* e = self(h);
+        if (!e->gui_) return false;
+        e->window_.resize_client(static_cast<int>(w), static_cast<int>(hh));
+        return true;
+    }
+    static bool gui_request_show(const clap_host_t* h) {
+        self(h)->window_.show();
+        return true;
+    }
+    static bool gui_request_hide(const clap_host_t*) { return false; }
+    static void gui_closed(const clap_host_t*, bool) {}
     static void latency_changed(const clap_host_t*) {}
     static void tail_changed(const clap_host_t*) {}
     static void log_msg(const clap_host_t* h, clap_log_severity, const char* msg) {
@@ -654,6 +711,8 @@ private:
         static const clap_host_tail_t tail{tail_changed};
         static const clap_host_log_t log{log_msg};
         static const clap_host_preset_load_t preset_load{preset_on_error, preset_loaded};
+        static const clap_host_gui_t gui{gui_resize_hints_changed, gui_request_resize, gui_request_show, gui_request_hide, gui_closed};
+        if (!std::strcmp(id, CLAP_EXT_GUI)) return &gui;
         if (!std::strcmp(id, CLAP_EXT_THREAD_CHECK)) return &thread_check;
         if (!std::strcmp(id, CLAP_EXT_PARAMS)) return &params;
         if (!std::strcmp(id, CLAP_EXT_STATE)) return &state;
@@ -676,6 +735,8 @@ private:
     const clap_plugin_audio_ports_t* audio_ports_ = nullptr;
     const clap_plugin_note_ports_t* note_ports_ = nullptr;
     const clap_plugin_preset_load_t* preset_load_ = nullptr;
+    const clap_plugin_gui_t* gui_ = nullptr;  // non-null while the editor is open
+    EditorWindow window_;
 
     PluginInfo info_;
     std::vector<ParamDesc> params_list_;
