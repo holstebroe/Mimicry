@@ -7,6 +7,8 @@
 #include <sstream>
 
 #include "core/Json.hpp"
+#include "core/Wav.hpp"
+#include "output/PresetExport.hpp"
 #include "opt/Objective.hpp"
 
 namespace mimicry::targets {
@@ -154,6 +156,101 @@ expected<std::vector<LibraryPreset>, std::string> list_library(const std::filesy
     }
     if (out.empty()) return unexpected("no presets (index.json with ok presets, or .state files) in " + dir.string());
     return out;
+}
+
+expected<ToneRunResult, std::string> run_tones(host::Instance& inst, const ToneRun& run,
+                                               const std::function<void(const ToneRunEntry&)>& progress,
+                                               const std::atomic<bool>* cancel) {
+    namespace fs = std::filesystem;
+    ToneRunResult result;
+    ToneOptions to = run.tone;
+    json::Array tones;
+    const int total = static_cast<int>(run.presets.size() * run.keys.size() * run.velocities.size());
+    int done = 0;
+    for (const auto& preset : run.presets) {
+        std::ifstream in(preset.state, std::ios::binary);
+        const std::vector<std::uint8_t> state((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+        const fs::path dir = run.out / preset.stem;
+        std::error_code ec;
+        fs::create_directories(dir, ec);
+        if (ec) return unexpected("cannot create " + dir.string());
+        for (const int key : run.keys)
+            for (const int vel : run.velocities) {
+                if (cancel && cancel->load()) {
+                    result.cancelled = true;
+                    goto finish;
+                }
+                {
+                    to.key = key;
+                    to.velocity = vel;
+                    const std::string stem = tone_stem(key, vel);
+                    json::Value entry;
+                    entry.set("preset", preset.name).set("preset_dir", preset.stem).set("note", key).set("velocity", vel)
+                        .set("state", fs::absolute(preset.state).string())
+                        .set("params", preset.params.empty() ? std::string() : fs::absolute(preset.params).string());
+                    auto res = render_tone(inst, state, to);
+                    std::string status;
+                    if (!res) {
+                        status = "error: " + res.error();
+                    } else if (!res->tone()) {
+                        status = "no usable take (" + (res->takes.empty() ? std::string() : res->takes[0].why) + ")";
+                    } else {
+                        const auto& tone = *res->tone();
+                        const WavData wav{tone.audio.sample_rate, tone.audio.channels, tone.audio.samples};
+                        if (auto w = write_wav(dir / (stem + ".wav"), wav, WavFormat::Float32); !w) {
+                            status = "error: " + w.error();
+                        } else {
+                            if (run.keep_takes)
+                                for (std::size_t t = 0; t < res->takes.size(); ++t)
+                                    if (res->takes[t].ok)
+                                        (void)write_wav(dir / std::format("{}_take{}.wav", stem, t + 1),
+                                                        WavData{tone.audio.sample_rate, tone.audio.channels, res->takes[t].audio.samples});
+                            status = res->unstable ? "unstable" : "ok";
+                            entry.set("file", (fs::path(preset.stem) / (stem + ".wav")).generic_string())
+                                .set("seconds", double(wav.frames()) / wav.sample_rate)
+                                .set("take", res->chosen + 1).set("spread", res->spread);
+                        }
+                    }
+                    json::Array take_info;
+                    if (res)
+                        for (std::size_t t = 0; t < res->takes.size(); ++t) {
+                            json::Value tv;
+                            tv.set("take", int(t) + 1).set("ok", res->takes[t].ok).set("why", res->takes[t].why)
+                                .set("level_db", res->takes[t].level_db).set("distance", res->takes[t].distance);
+                            take_info.push_back(std::move(tv));
+                        }
+                    entry.set("takes", std::move(take_info)).set("status", status);
+                    tones.push_back(std::move(entry));
+                    const bool good = status == "ok" || status == "unstable";
+                    result.written += good ? 1 : 0;
+                    result.failed += good ? 0 : 1;
+                    result.unstable += status == "unstable" ? 1 : 0;
+                    ++done;
+                    if (progress) {
+                        ToneRunEntry e;
+                        e.preset = preset.stem;
+                        e.stem = stem;
+                        e.status = status;
+                        e.done = done;
+                        e.total = total;
+                        if (res && res->tone()) {
+                            e.chosen = res->chosen + 1;
+                            e.takes = static_cast<int>(res->takes.size());
+                            e.spread = res->spread;
+                        }
+                        progress(e);
+                    }
+                }
+            }
+    }
+finish:
+    json::Value manifest;
+    manifest.set("plugin", run.plugin_name).set("format", run.plugin_format).set("uid", run.plugin_uid)
+        .set("version_hash", run.plugin_version_hash).set("takes", to.takes).set("end_db", to.end_db).set("gate_ms", to.gate_ms)
+        .set("cancelled", result.cancelled).set("tones", std::move(tones));
+    result.manifest = run.out / "tones.json";
+    if (auto w = output::write_text(result.manifest, manifest.dump(2) + "\n"); !w) return unexpected(w.error());
+    return result;
 }
 
 std::string tone_stem(int key, int velocity) {

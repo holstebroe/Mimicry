@@ -766,88 +766,35 @@ int cmd_tones(const Args& a) {
     }
     if (a.has("--editor")) inst->close_editor();
 
-    targets::ToneOptions to;
-    to.takes = int(a.num("--takes", 5));
-    to.gate_ms = a.num("--gate", to.gate_ms);
-    to.end_db = a.num("--end-db", to.end_db);
-    to.max_tail_ms = a.num("--max-tail-ms", to.max_tail_ms);
-    to.max_spread = a.num("--max-spread", to.max_spread);
-    to.settle_ms = a.num("--settle-ms", to.settle_ms);
-    const fs::path root = a.get("--out", "tones");
-    const bool keep_takes = a.has("--keep-takes");
+    targets::ToneRun run;
+    run.presets = std::move(*library);
+    run.keys = keys;
+    run.velocities = velocities;
+    run.tone.takes = int(a.num("--takes", 5));
+    run.tone.gate_ms = a.num("--gate", run.tone.gate_ms);
+    run.tone.end_db = a.num("--end-db", run.tone.end_db);
+    run.tone.max_tail_ms = a.num("--max-tail-ms", run.tone.max_tail_ms);
+    run.tone.max_spread = a.num("--max-spread", run.tone.max_spread);
+    run.tone.settle_ms = a.num("--settle-ms", run.tone.settle_ms);
+    run.out = a.get("--out", "tones");
+    run.keep_takes = a.has("--keep-takes");
+    run.plugin_name = info.name;
+    run.plugin_uid = info.uid;
+    run.plugin_version_hash = info.version_hash;
+    run.plugin_format = std::string(host::to_string(info.format));
 
-    json::Array tones;
-    int written = 0, failed = 0, unstable = 0;
-    for (const auto& preset : *library) {
-        std::ifstream in(preset.state, std::ios::binary);
-        const std::vector<std::uint8_t> state((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
-        const fs::path dir = root / preset.stem;
-        std::error_code ec;
-        fs::create_directories(dir, ec);
-        if (ec) return fail("tones", "cannot create " + dir.string());
-        for (const int key : keys)
-            for (const int vel : velocities) {
-                to.key = key;
-                to.velocity = vel;
-                const std::string stem = targets::tone_stem(key, vel);
-                json::Value entry;
-                entry.set("preset", preset.name).set("preset_dir", preset.stem).set("note", key).set("velocity", vel)
-                    .set("state", fs::absolute(preset.state).string())
-                    .set("params", preset.params.empty() ? std::string() : fs::absolute(preset.params).string());
-                auto res = targets::render_tone(*inst, state, to);
-                std::string status;
-                if (!res) {
-                    status = "error: " + res.error();
-                } else if (!res->tone()) {
-                    status = "no usable take (" + (res->takes.empty() ? std::string() : res->takes[0].why) + ")";
-                } else {
-                    const auto& tone = *res->tone();
-                    const WavData wav{tone.audio.sample_rate, tone.audio.channels, tone.audio.samples};
-                    const fs::path wavpath = dir / (stem + ".wav");
-                    if (auto w = write_wav(wavpath, wav, WavFormat::Float32); !w) {
-                        status = "error: " + w.error();
-                    } else {
-                        if (keep_takes)
-                            for (std::size_t t = 0; t < res->takes.size(); ++t)
-                                if (res->takes[t].ok)
-                                    (void)write_wav(dir / std::format("{}_take{}.wav", stem, t + 1),
-                                                    WavData{tone.audio.sample_rate, tone.audio.channels, res->takes[t].audio.samples});
-                        status = res->unstable ? "unstable" : "ok";
-                        entry.set("file", (fs::path(preset.stem) / (stem + ".wav")).generic_string())
-                            .set("seconds", double(wav.frames()) / wav.sample_rate)
-                            .set("take", res->chosen + 1).set("spread", res->spread);
-                    }
-                }
-                json::Array take_info;
-                if (res)
-                    for (std::size_t t = 0; t < res->takes.size(); ++t) {
-                        json::Value tv;
-                        tv.set("take", int(t) + 1).set("ok", res->takes[t].ok).set("why", res->takes[t].why)
-                            .set("level_db", res->takes[t].level_db).set("distance", res->takes[t].distance);
-                        take_info.push_back(std::move(tv));
-                    }
-                entry.set("takes", std::move(take_info)).set("status", status);
-                tones.push_back(std::move(entry));
-                const bool good = status == "ok" || status == "unstable";
-                written += good ? 1 : 0;
-                failed += good ? 0 : 1;
-                unstable += status == "unstable" ? 1 : 0;
-                std::fputs(std::format("  {:<28} {:<8} {}{}\n", preset.stem, stem, status,
-                                       res && res->tone() ? std::format("  take {} of {}, spread {:.2f}", res->chosen + 1, res->takes.size(), res->spread) : "")
-                               .c_str(),
-                           stdout);
-            }
-    }
-    json::Value manifest;
-    manifest.set("plugin", info.name).set("format", std::string(host::to_string(info.format))).set("uid", info.uid)
-        .set("version_hash", info.version_hash).set("takes", to.takes).set("end_db", to.end_db).set("gate_ms", to.gate_ms)
-        .set("tones", std::move(tones));
-    if (auto w = output::write_text(root / "tones.json", manifest.dump(2) + "\n"); !w) return fail("tones", w.error());
-    std::fputs(std::format("{} tone(s) written, {} unstable, {} failed; manifest {}\n", written, unstable, failed,
-                           (root / "tones.json").string())
+    auto res = targets::run_tones(*inst, run, [](const targets::ToneRunEntry& e) {
+        std::fputs(std::format("  {:<28} {:<8} {}{}\n", e.preset, e.stem, e.status,
+                               e.chosen > 0 ? std::format("  take {} of {}, spread {:.2f}", e.chosen, e.takes, e.spread) : "")
+                       .c_str(),
+                   stdout);
+    });
+    if (!res) return fail("tones", res.error());
+    std::fputs(std::format("{} tone(s) written, {} unstable, {} failed; manifest {}\n", res->written, res->unstable, res->failed,
+                           res->manifest.string())
                    .c_str(),
                stdout);
-    return written > 0 ? 0 : 1;
+    return res->written > 0 ? 0 : 1;
 }
 
 int cmd_replay(const Args& a) {

@@ -239,6 +239,14 @@ starts the run and closes the window. Without `--editor` the run starts at Enter
 prompt). Renders reset the plugin, they do not restart it, so a session held in the worker's memory survives;
 with `--editor` the worker is not recycled [D]. A crashed or hung worker loses that session.
 
+**GUI host** (`mimicry_gui`, Windows only, plain Win32, `src/gui/GuiMain.cpp`): the same run from a window, for plugins
+that must be activated by hand. Fields for the plugin, the preset folder, the output folder, notes, velocities
+and takes. "Open plugin window" loads the plugin in a worker and shows its editor (02 §3); the user activates or
+signs in; "Start" closes the editor and calls `targets::run_tones` (the code behind `mimicry tones`) on a
+background thread, with a progress bar, a log of every combination and a Stop button (checked between
+combinations; the manifest still lists what was done). The worker is never recycled, so an in-memory session
+survives the whole run [D]. Untested on a real plugin (OQ12).
+
 Per preset × pitch × velocity (`--notes`, default C2,C3,C4 [D]; `--velocities`, default 50,110 [D]):
 `--takes` (5 [D]) renders, each from the complete state after a reset (CLAUDE.md rule 5): one note, held
 `--gate` ms (1000 [D]), then released and left to ring. A take **ends when the note has dropped below**

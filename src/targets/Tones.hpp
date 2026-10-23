@@ -8,8 +8,10 @@
 // from the complete preset state after a reset (rule 5); a failed or silent take is recorded, never
 // dropped (rule 6).
 
+#include <atomic>
 #include <cstdint>
 #include <filesystem>
+#include <functional>
 #include <string>
 #include <vector>
 
@@ -77,6 +79,39 @@ struct LibraryPreset {
 
 // The `ok` presets of <dir>/index.json, or, without an index, every .state file in the folder (sorted).
 [[nodiscard]] expected<std::vector<LibraryPreset>, std::string> list_library(const std::filesystem::path& dir);
+
+// A whole run over a library (the `mimicry tones` loop, shared with the GUI host).
+struct ToneRun {
+    std::vector<LibraryPreset> presets;
+    std::vector<int> keys, velocities;
+    ToneOptions tone;                  // key and velocity are set per combination
+    std::filesystem::path out;
+    bool keep_takes = false;           // also write every take
+    std::string plugin_name, plugin_uid, plugin_version_hash;
+    std::string plugin_format;
+};
+
+// One finished combination, for progress output.
+struct ToneRunEntry {
+    std::string preset;                // library stem
+    std::string stem;                  // "C3_v100"
+    std::string status;                // ok | unstable | no usable take (...) | error: ...
+    int chosen = 0, takes = 0;         // 1-based chosen take, 0 if none
+    double spread = 0;
+    int done = 0, total = 0;           // combinations finished / in the run
+};
+
+struct ToneRunResult {
+    int written = 0, failed = 0, unstable = 0;
+    bool cancelled = false;
+    std::filesystem::path manifest;
+};
+
+// Renders every preset x key x velocity, writes <out>/<stem>/<note>_v<vel>.wav and <out>/tones.json (also after a
+// cancel, with what was done). `cancel` is checked between combinations.
+[[nodiscard]] expected<ToneRunResult, std::string> run_tones(host::Instance& instance, const ToneRun& run,
+                                                             const std::function<void(const ToneRunEntry&)>& progress,
+                                                             const std::atomic<bool>* cancel = nullptr);
 
 // "C3_v100" (note name as the rest of Mimicry: C3 = MIDI 48).
 [[nodiscard]] std::string tone_stem(int key, int velocity);
