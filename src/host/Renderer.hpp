@@ -60,6 +60,10 @@ public:
     [[nodiscard]] expected<std::vector<PresetRef>, HostError> presets() override;
     [[nodiscard]] expected<CapturedPreset, HostError> apply_preset(const PresetRef& ref, double wait_ms = 200) override;
 
+    [[nodiscard]] expected<void, HostError> open_editor() override;
+    void close_editor() override;
+    [[nodiscard]] bool editor_open() const override { return engine_->editor_open(); }
+
     // Reset before every render (default). Turning it off is for profiling only: a candidate must
     // start from a clean state (CLAUDE.md rule 5).
     void set_reset_each_render(bool on) { reset_each_render_ = on; }

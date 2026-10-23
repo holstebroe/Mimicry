@@ -182,6 +182,15 @@ expected<void, HostError> Renderer::restart_engine() {
 
 expected<void, HostError> Renderer::reset() { return restart_engine(); }
 
+expected<void, HostError> Renderer::open_editor() { return guarded("open_editor", [&] { return engine_->open_editor(); }); }
+
+void Renderer::close_editor() {
+    try {
+        engine_->close_editor();
+    } catch (...) {
+    }
+}
+
 expected<std::vector<PresetRef>, HostError> Renderer::presets() {
     std::vector<PresetRef> out;
     try {

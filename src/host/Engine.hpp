@@ -97,6 +97,13 @@ public:
     // True if Block::program reaches the plugin.
     [[nodiscard]] virtual bool midi_program_change() const { return false; }
 
+    // The plugin's editor in a Win32 window (main thread). Windows only, see Instance::open_editor.
+    [[nodiscard]] virtual expected<void, HostError> open_editor() {
+        return unexpected(HostError{"the plugin editor can only be shown on Windows"});
+    }
+    virtual void close_editor() {}
+    [[nodiscard]] virtual bool editor_open() const { return false; }
+
     // render thread
     [[nodiscard]] virtual expected<void, HostError> start() = 0;
     virtual void stop() = 0;

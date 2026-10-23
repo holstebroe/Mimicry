@@ -84,7 +84,7 @@ start/stop-processing calls on the render thread.
 Many plugins (JUCE-based ones in particular, in either format) expect a **running message loop on the
 main thread** for timers and async updates. The worker's main thread therefore pumps a minimal loop
 between jobs (Win32 message pump, macOS run loop, a poll loop on Linux). No window is created, except
-by `capture` (06 §6), which opens the plugin's editor in a Win32 top-level window of the worker. Editor
+by `capture` and `tones --editor` (06 §6, §6a), which open the plugin's editor in a Win32 top-level window of the worker. Editor
 hosting is **Windows only** [D: owner, plan OQ12]; elsewhere `open_editor` returns an error. The
 supervisor never loads the plugin or its editor. A plugin that blocks
 waiting for a dialog or window is caught by the watchdog (05 §1).

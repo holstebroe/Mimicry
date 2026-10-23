@@ -73,6 +73,7 @@ mimicry_warnings(mimicry_features)
 
 add_library(mimicry_host STATIC
     src/host/Codec.cpp
+    src/host/EditorWindow.cpp
     src/host/FileHash.cpp
     src/host/MessagePump.cpp
     src/host/ParamUtil.cpp
@@ -156,6 +157,7 @@ mimicry_warnings(mimicry_output)
 # Targets (docs/spec/06_TARGETS.md): the preset harvest so far (section 6).
 add_library(mimicry_targets STATIC
     src/targets/Harvest.cpp
+    src/targets/Tones.cpp
 )
 target_link_libraries(mimicry_targets PUBLIC mimicry_opt mimicry_output mimicry_host mimicry_core)
 mimicry_warnings(mimicry_targets)
@@ -166,6 +168,16 @@ mimicry_warnings(mimicry_targets)
 add_executable(mimicry src/app/main.cpp)
 target_link_libraries(mimicry PRIVATE mimicry_targets mimicry_opt mimicry_output mimicry_supervisor mimicry_host mimicry_core)
 mimicry_warnings(mimicry)
+
+# Windows GUI host for the tone harvest (WP5.13): pick folders, activate the plugin in its own window, start.
+if(WIN32)
+    add_executable(mimicry_gui WIN32 src/gui/GuiMain.cpp)
+    target_include_directories(mimicry_gui PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+    target_link_libraries(mimicry_gui PRIVATE mimicry_targets mimicry_features mimicry_output mimicry_supervisor mimicry_host mimicry_core
+        user32 gdi32 comdlg32 shell32 ole32 comctl32)
+    mimicry_warnings(mimicry_gui)
+    add_dependencies(mimicry_gui mimicry_worker)
+endif()
 
 # Render worker: the only process that loads plugins (docs/spec/05_RESILIENCE.md section 1).
 add_executable(mimicry_worker src/worker/worker_main.cpp)
