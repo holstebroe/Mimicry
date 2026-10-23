@@ -174,6 +174,17 @@ public:
     // its clean state afterwards, so later renders are unaffected. Only harvest-type jobs call this (05
     // section 9), never a fit.
     [[nodiscard]] virtual expected<CapturedPreset, HostError> apply_preset(const PresetRef& ref, double wait_ms = 200) = 0;
+
+    // The plugin's own editor in a top-level window, so the user can sign in or dismiss a dialog before a run
+    // (spec 02 section 3). Windows only; elsewhere an error. The window lives on the main thread and is
+    // serviced by `pump()` (the worker pumps while it waits for commands). Closing the window, or
+    // `close_editor()`, ends it; renders do not need it closed.
+    [[nodiscard]] virtual expected<void, HostError> open_editor() {
+        return unexpected(HostError{"the plugin editor can only be shown on Windows"});
+    }
+    virtual void close_editor() {}
+    // True while the editor window is open.
+    [[nodiscard]] virtual bool editor_open() const { return false; }
 };
 
 // Opens a plugin by path (format from the extension) in THIS process. `uid` picks one plugin of a

@@ -120,6 +120,14 @@ private:
             if (auto r = instance_->reset(); !r) return error_reply(r.error().message);
             return ok_reply();
         }
+        if (cmd == "open_editor") {
+            if (auto r = instance_->open_editor(); !r) return error_reply(r.error().message);
+            return ok_reply();
+        }
+        if (cmd == "close_editor") {
+            instance_->close_editor();
+            return ok_reply();
+        }
         if (cmd == "save_state") {
             auto blob = instance_->save_state();
             if (!blob) return error_reply(blob.error().message);

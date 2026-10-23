@@ -57,6 +57,10 @@ public:
     [[nodiscard]] expected<std::vector<std::uint8_t>, host::HostError> save_state() override;
     [[nodiscard]] expected<void, host::HostError> load_state(const std::vector<std::uint8_t>& blob) override;
     [[nodiscard]] expected<void, host::HostError> reset() override;
+    // The editor opens in the worker (the plugin never runs in this process, rule 4); the worker pumps its
+    // window while it waits for the next command.
+    [[nodiscard]] expected<void, host::HostError> open_editor() override;
+    void close_editor() override;
     [[nodiscard]] expected<std::vector<host::PresetRef>, host::HostError> presets() override;
     // A crash or hang while loading costs the worker (restarted on the next call); the error says which.
     [[nodiscard]] expected<host::CapturedPreset, host::HostError> apply_preset(const host::PresetRef& ref, double wait_ms = 200) override;

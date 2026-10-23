@@ -11,6 +11,7 @@
 #include <filesystem>
 #include <format>
 #include <fstream>
+#include <iostream>
 #include <map>
 #include <mutex>
 #include <optional>
@@ -38,6 +39,7 @@
 #include "supervisor/WorkerClient.hpp"
 #include "supervisor/WorkerPool.hpp"
 #include "targets/Harvest.hpp"
+#include "targets/Tones.hpp"
 
 namespace {
 
@@ -55,6 +57,7 @@ constexpr Command kCommands[] = {
     {"probe", "probe <plugin>", "sensitivity, safe range and hazard probe; writes the plugin profile"},
     {"fit", "fit --plugin P --wav T.wav", "match a WAV"},
     {"harvest", "harvest <plugin>", "collect the plugin's presets as verified states (preset library)"},
+    {"tones", "tones <plugin> --presets DIR", "play each harvested preset (pitches x velocities x takes), keep the consensus tone as a WAV"},
     {"transfer", "transfer --source A --target B", "match source presets in another plugin (any format mix)"},
     {"image", "image --plugin P --image I.png", "match an image"},
     {"fingerprint", "fingerprint <plugin>", "build the random-preset feature database"},
@@ -90,6 +93,15 @@ harvest options:
   --all-methods        try every method (default: stop at the first that yields presets)
   --max N              presets to collect    --wait-ms MS (200) after each load
   --no-recipe          ignore the profile's recipe    --out DIR library root (default: presets)
+
+tones options:
+  --presets DIR        harvest library folder (index.json + .state files; required)
+  --notes C2,C3,C4     pitches (default)            --velocities 50,110   MIDI velocities (default)
+  --takes N (5)        --gate MS (1000) key held    --end-db -60   a note has ended when it stays below this
+  --max-tail-ms MS     longest decay waited for (8000)    --max-spread D   flag unstable tones (2.0)
+  --preset a,b         only presets whose name contains one of these    --keep-takes   also write every take
+  --editor             open the plugin's own window first (Windows), press Enter there to start
+  --out DIR            tone root (default: tones)
 
 probe options: --no-pairs      fingerprint options: --count N (2000)
 replay options: --plugin P (default: the path in the report)   --isolated (render in a worker)
@@ -131,7 +143,7 @@ struct Args {
 };
 
 constexpr std::string_view kFlags[] = {"--no-isolation", "--no-prior", "--no-pairs", "--solve-gain", "--isolated",
-                                       "--all-methods", "--raw-files", "--no-recipe"};
+                                       "--all-methods", "--raw-files", "--no-recipe", "--keep-takes", "--editor", "--start"};
 
 Args parse_args(int argc, char** argv, int first) {
     Args a;
@@ -693,6 +705,147 @@ int cmd_harvest(const Args& a) {
     return res->ok_count() > 0 ? 0 : 1;
 }
 
+// docs/spec/06_TARGETS.md section 6a. One worker, presets one after the other.
+int cmd_tones(const Args& a) {
+    if (a.positional.empty() || !a.has("--presets"))
+        return fail("tones", "usage: mimicry tones <plugin> --presets DIR [--notes C2,C3] [--velocities 50,110] [--editor]");
+    const std::string path = a.positional[0];
+    if (auto f = host::format_from_path(path); !f) return fail("tones", f.error());
+    auto library = targets::list_library(a.get("--presets"));
+    if (!library) return fail("tones", library.error());
+
+    std::vector<int> keys, velocities;
+    for (const auto& n : split(a.get("--notes", "C2,C3,C4"))) {
+        const auto k = features::parse_note_name(n);
+        if (!k) return fail("tones", "bad note '" + n + "'");
+        keys.push_back(*k);
+    }
+    for (const auto& v : split(a.get("--velocities", "50,110"))) {
+        const int x = std::atoi(v.c_str());
+        if (x < 1 || x > 127) return fail("tones", "velocity '" + v + "' is not 1..127");
+        velocities.push_back(x);
+    }
+    if (keys.empty() || velocities.empty()) return fail("tones", "need at least one note and one velocity");
+    const auto filters = split(a.get("--preset"));
+    std::erase_if(*library, [&](const targets::LibraryPreset& p) {
+        if (filters.empty()) return false;
+        return std::ranges::none_of(filters, [&](const std::string& f) { return p.stem.find(f) != std::string::npos; });
+    });
+    if (library->empty()) return fail("tones", "no preset matches --preset");
+
+    std::unique_ptr<host::Instance> inst;
+    if (a.has("--no-isolation")) {
+        auto r = host::open(path);
+        if (!r) return fail("tones", r.error().message);
+        inst = std::move(*r);
+    } else {
+        auto r = supervisor::WorkerClient::open(path);
+        if (!r) return fail("tones", r.error().message);
+        inst = std::move(*r);
+    }
+    const host::PluginInfo info = inst->info();
+    std::fputs(std::format("{} ({}): {} preset(s) x {} note(s) x {} velocity(ies) x {} take(s)\n", info.name, host::to_string(info.format),
+                           library->size(), keys.size(), velocities.size(), int(a.num("--takes", 5)))
+                   .c_str(),
+               stdout);
+
+    // The plugin's own window (login, licence), then the user starts the run (spec 06 section 6a).
+    if (a.has("--editor")) {
+        if (auto e = inst->open_editor(); !e) return fail("tones", e.error().message);
+        std::fputs("The plugin window is open: sign in or dismiss any dialog, then press Enter here to start.\n", stdout);
+    } else if (!a.has("--start")) {
+        std::fputs("Press Enter to start (or pass --start).\n", stdout);
+    }
+    if (a.has("--editor") || !a.has("--start")) {
+        std::string line;
+        std::getline(std::cin, line);
+    }
+    if (a.has("--editor")) inst->close_editor();
+
+    targets::ToneOptions to;
+    to.takes = int(a.num("--takes", 5));
+    to.gate_ms = a.num("--gate", to.gate_ms);
+    to.end_db = a.num("--end-db", to.end_db);
+    to.max_tail_ms = a.num("--max-tail-ms", to.max_tail_ms);
+    to.max_spread = a.num("--max-spread", to.max_spread);
+    to.settle_ms = a.num("--settle-ms", to.settle_ms);
+    const fs::path root = a.get("--out", "tones");
+    const bool keep_takes = a.has("--keep-takes");
+
+    json::Array tones;
+    int written = 0, failed = 0, unstable = 0;
+    for (const auto& preset : *library) {
+        std::ifstream in(preset.state, std::ios::binary);
+        const std::vector<std::uint8_t> state((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+        const fs::path dir = root / preset.stem;
+        std::error_code ec;
+        fs::create_directories(dir, ec);
+        if (ec) return fail("tones", "cannot create " + dir.string());
+        for (const int key : keys)
+            for (const int vel : velocities) {
+                to.key = key;
+                to.velocity = vel;
+                const std::string stem = targets::tone_stem(key, vel);
+                json::Value entry;
+                entry.set("preset", preset.name).set("preset_dir", preset.stem).set("note", key).set("velocity", vel)
+                    .set("state", fs::absolute(preset.state).string())
+                    .set("params", preset.params.empty() ? std::string() : fs::absolute(preset.params).string());
+                auto res = targets::render_tone(*inst, state, to);
+                std::string status;
+                if (!res) {
+                    status = "error: " + res.error();
+                } else if (!res->tone()) {
+                    status = "no usable take (" + (res->takes.empty() ? std::string() : res->takes[0].why) + ")";
+                } else {
+                    const auto& tone = *res->tone();
+                    const WavData wav{tone.audio.sample_rate, tone.audio.channels, tone.audio.samples};
+                    const fs::path wavpath = dir / (stem + ".wav");
+                    if (auto w = write_wav(wavpath, wav, WavFormat::Float32); !w) {
+                        status = "error: " + w.error();
+                    } else {
+                        if (keep_takes)
+                            for (std::size_t t = 0; t < res->takes.size(); ++t)
+                                if (res->takes[t].ok)
+                                    (void)write_wav(dir / std::format("{}_take{}.wav", stem, t + 1),
+                                                    WavData{tone.audio.sample_rate, tone.audio.channels, res->takes[t].audio.samples});
+                        status = res->unstable ? "unstable" : "ok";
+                        entry.set("file", (fs::path(preset.stem) / (stem + ".wav")).generic_string())
+                            .set("seconds", double(wav.frames()) / wav.sample_rate)
+                            .set("take", res->chosen + 1).set("spread", res->spread);
+                    }
+                }
+                json::Array take_info;
+                if (res)
+                    for (std::size_t t = 0; t < res->takes.size(); ++t) {
+                        json::Value tv;
+                        tv.set("take", int(t) + 1).set("ok", res->takes[t].ok).set("why", res->takes[t].why)
+                            .set("level_db", res->takes[t].level_db).set("distance", res->takes[t].distance);
+                        take_info.push_back(std::move(tv));
+                    }
+                entry.set("takes", std::move(take_info)).set("status", status);
+                tones.push_back(std::move(entry));
+                const bool good = status == "ok" || status == "unstable";
+                written += good ? 1 : 0;
+                failed += good ? 0 : 1;
+                unstable += status == "unstable" ? 1 : 0;
+                std::fputs(std::format("  {:<28} {:<8} {}{}\n", preset.stem, stem, status,
+                                       res && res->tone() ? std::format("  take {} of {}, spread {:.2f}", res->chosen + 1, res->takes.size(), res->spread) : "")
+                               .c_str(),
+                           stdout);
+            }
+    }
+    json::Value manifest;
+    manifest.set("plugin", info.name).set("format", std::string(host::to_string(info.format))).set("uid", info.uid)
+        .set("version_hash", info.version_hash).set("takes", to.takes).set("end_db", to.end_db).set("gate_ms", to.gate_ms)
+        .set("tones", std::move(tones));
+    if (auto w = output::write_text(root / "tones.json", manifest.dump(2) + "\n"); !w) return fail("tones", w.error());
+    std::fputs(std::format("{} tone(s) written, {} unstable, {} failed; manifest {}\n", written, unstable, failed,
+                           (root / "tones.json").string())
+                   .c_str(),
+               stdout);
+    return written > 0 ? 0 : 1;
+}
+
 int cmd_replay(const Args& a) {
     if (a.positional.empty()) return fail("replay", "usage: mimicry replay <crash.json> [--plugin P] [--isolated]");
     auto report = output::FailureReport::load(a.positional[0]);
@@ -756,6 +909,7 @@ int main(int argc, char** argv) {
     if (cmd == "fingerprint") return cmd_fingerprint(args);
     if (cmd == "replay") return cmd_replay(args);
     if (cmd == "harvest") return cmd_harvest(args);
+    if (cmd == "tones") return cmd_tones(args);
     for (const auto& c : kCommands)
         if (c.name == cmd) return not_implemented(cmd);
     std::fputs(std::format("mimicry: unknown command '{}' (try --help)\n", cmd).c_str(), stderr);

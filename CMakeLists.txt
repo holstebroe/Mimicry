@@ -156,6 +156,7 @@ mimicry_warnings(mimicry_output)
 # Targets (docs/spec/06_TARGETS.md): the preset harvest so far (section 6).
 add_library(mimicry_targets STATIC
     src/targets/Harvest.cpp
+    src/targets/Tones.cpp
 )
 target_link_libraries(mimicry_targets PUBLIC mimicry_opt mimicry_output mimicry_host mimicry_core)
 mimicry_warnings(mimicry_targets)
