@@ -83,7 +83,7 @@ public:
         wc.cbSize = sizeof(wc);
         wc.lpfnWndProc = &App::proc;
         wc.hInstance = instance_;
-        wc.hCursor = LoadCursorW(nullptr, MAKEINTRESOURCEW(32512))  // IDC_ARROW;
+        wc.hCursor = LoadCursorW(nullptr, MAKEINTRESOURCEW(32512));  // IDC_ARROW
         wc.hbrBackground = reinterpret_cast<HBRUSH>(COLOR_BTNFACE + 1);
         wc.lpszClassName = L"MimicryGui";
         if (!RegisterClassExW(&wc)) return false;

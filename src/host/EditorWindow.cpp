@@ -51,7 +51,7 @@ expected<void, HostError> EditorWindow::create(const std::string& title, int wid
         wc.cbSize = sizeof(wc);
         wc.lpfnWndProc = &window_proc;
         wc.hInstance = GetModuleHandleW(nullptr);
-        wc.hCursor = LoadCursorW(nullptr, MAKEINTRESOURCEW(32512))  // IDC_ARROW;
+        wc.hCursor = LoadCursorW(nullptr, MAKEINTRESOURCEW(32512));  // IDC_ARROW
         wc.hbrBackground = reinterpret_cast<HBRUSH>(COLOR_WINDOW + 1);
         wc.lpszClassName = kClassName;
         return RegisterClassExW(&wc) != 0 || GetLastError() == ERROR_CLASS_ALREADY_EXISTS;
