@@ -217,7 +217,9 @@ int main(int argc, char** argv) {
 
     // Pool: parallel rendering keeps job order and survives crashes.
     {
-        auto pool = WorkerPool::open(plugin, {}, 4, opt);
+        auto pool_opt = opt;
+        pool_opt.min_timeout_s = 10.0;  // this block only crashes workers; a respawn on a loaded runner can pass 1 s
+        auto pool = WorkerPool::open(plugin, {}, 4, pool_opt);
         check(pool.has_value(), "pool opens");
         if (pool) {
             std::vector<host::Job> jobs;
