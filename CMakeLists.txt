@@ -359,5 +359,12 @@ if(MIMICRY_BUILD_TESTS)
             add_test(NAME worker_vst3 COMMAND mimicry_worker_test ${MIMICRY_TEST_SYNTH_VST3} $<TARGET_FILE:mimicry_worker>)
         endif()
         add_test(NAME worker_clap COMMAND mimicry_worker_test $<TARGET_FILE:mimicry_test_synth> $<TARGET_FILE:mimicry_worker>)
+
+        # Minutes-long fits: skipped on push (ctest -LE slow), run nightly.
+        foreach(t cli_clap cli_vst3 cli_clap_to_vst3 fit_clap fit_vst3)
+            if(TEST ${t})
+                set_tests_properties(${t} PROPERTIES LABELS slow)
+            endif()
+        endforeach()
     endif()
 endif()
