@@ -56,6 +56,19 @@ time, flags), a folder of target states (and `.vstpreset` files for VST3 targets
 presets that could not be matched, defined as loss above 1.5x the repeatability floor after the full
 pipeline (typically a source feature the target lacks: an effect, a mod destination, a wavetable).
 
+Implemented [A] (WP5.3, first version, `app/CmdTransfer`): `mimicry transfer --source A --target B` renders each
+ok preset of the source's library (`--library DIR`, else `presets/<source>`, harvested on demand unless
+`--no-harvest`; `--from`/`--method` steer that harvest; `--preset NAME|N,...` and `--max N` pick presets) from its state
+through **one note plan** (`--note` C3, `--gate` 800 ms, `--velocity` 100: the probe plan above is WP5.2), and fits
+the target plugin to that render exactly as `mimicry fit` fits a WAV (the pitch is measured from the render, the
+gate of the target's note equals the source's), `--minutes` per preset (default 5), `--total-minutes` overall.
+The run directory holds a folder per preset (`NNN-name/`: `source.state`, `source.wav`, the fit's files) and
+`bank.json` / `bank-report.csv` (number, name, status, loss, gain, evaluations, time, flag `unmatched` when the
+loss is above 1.5 x the target's repeatability floor). There is no holdout, no warm start from a close preset and
+no ranking of several targets yet (WP5.11, 6.2). A transfer can be cancelled and resumed per preset and inside
+the running preset (09 §3). Source and target may be the same plugin, the same format or different formats
+(`cli_clap_to_vst3`).
+
 **Learned mapping**: see 04 §8. Mappings are keyed by (source format, source uid, target format,
 target uid).
 
@@ -181,7 +194,8 @@ files are tried whatever their extension; in `--from` folders `.state` (and `.vs
 every file with `--raw-files`; for VST3 also the standard folders (`~/.vst3/presets`, `/usr/share/vst3/presets`,
 `/usr/local/share/vst3/presets` on Linux; `~/Library/Audio/Presets`, `/Library/Audio/Presets` on macOS;
 `Documents\VST3 Presets`, `%APPDATA%\VST3 Presets`, `%PROGRAMDATA%\VST3 Presets` on Windows, each
-`/<vendor>/<plugin>`) [S: VST3 SDK]. A `params.json` as a preset source is not implemented yet. Effects
+`/<vendor>/<plugin>`) [S: VST3 SDK]. A `params.json` as a preset source is not implemented yet. A harvest can be cancelled and continued: `--continue`
+takes over the earlier session's tried presets from `index.json` (09 §3). Effects
 are verified like instruments until the effect probe signals exist (WP5.7).
 
 **Names** come from the plugin where a format offers them: CLAP discovery metadata; VST3 program names
@@ -200,7 +214,18 @@ hash polled every 500 ms [D] for plugins whose presets change hidden state only 
 capture is verified and deduplicated as above, so the user can click through a whole bank with the
 plugin's own "next" arrow.
 
-**Taught click** (`mimicry capture --teach`, Windows) [A]: the user presses the plugin's own "next
+Implemented as [D]: the capture window has *Capture*, *Teach click*, *Auto-capture* and *Done* buttons and a
+status line; `--max N` and Cancel (Ctrl-C / `mimicry cancel`) end the session, `--continue` keeps the captures of
+an earlier session, and each capture is verified by a second worker (`PresetVerifier`, shared with `harvest`).
+Change signals (`take_change_signals`) are collected by the worker but `--watch` is not implemented yet (OQ13).
+The reproducibility check (a second render of the state must match, else `not-reproducible`) is **off by
+default** for `harvest` and `capture` [D: owner, plugins with random modulation never pass]; `--verify-repro`
+turns it on. Auto-capture runs up to 2000 presets [D], then stops like at the end of a bank.
+A captured preset takes the plugin's own name when its state holds one: a string next to a key such as
+`presetName` or `displayName` (JUCE value trees do; `guess_preset_name`) [D]; else `capture-NNN`.
+Edits the plugin's controller makes in its editor are forwarded to the processor before the state is saved.
+
+**Taught click** (Teach click in the capture window; `--auto` replays the stored click) [A]: the user presses the plugin's own "next
 preset" button once. The worker records the click from the editor window's message hook: the child
 window under the cursor and the position relative to it, so it survives the window being moved. The
 click must change the state hash, else the user is asked to try again. Mimicry then replays it as posted
@@ -225,6 +250,113 @@ files only for `ok` presets (numbered 1..N in harvest order), every tried preset
 report (number, name, method, index, outcome, duplicate of, difference, params reproduce, state hash,
 message), the per-method summary and the recipe in `index.json`; a re-harvest into the same folder first
 removes the files the previous `index.json` listed, and nothing else.
+
+## 6a. Tone harvest (`mimicry tones`) [A]
+
+Training tones for the optimiser: for each preset of a harvest library, a small grid of pitches and
+velocities, each reduced to one consensus tone. The optimiser then fits the same source plugin to that tone
+(the preset's own state is the known answer).
+
+Flow: the user names the library folder (`--presets`, the `mimicry harvest` output: `index.json` and
+`.state` files, or any folder of `.state` files) and the plugin. With `--editor` (Windows, 02 §3) the plugin's
+own window opens in the worker so the user can sign in or dismiss a dialog; pressing Enter in the console
+starts the run and closes the window. Without `--editor` the run starts at Enter (`--start` skips the
+prompt). Renders reset the plugin, they do not restart it, so a session held in the worker's memory survives;
+with `--editor` the worker is not recycled [D]. A crashed or hung worker loses that session.
+
+**GUI host** (`mimicry_tones_gui`, Windows only, plain Win32, `src/gui/GuiMain.cpp`): the same run from a window, for plugins
+that must be activated by hand. Fields for the plugin, the preset folder, the output folder, notes, velocities
+and takes. "Open plugin window" loads the plugin in a worker and shows its editor (02 §3); the user activates or
+signs in; "Start" closes the editor and calls `targets::run_tones` (the code behind `mimicry tones`) on a
+background thread, with a progress bar, a log of every combination and a Stop button (checked between
+combinations; the manifest still lists what was done). The worker is never recycled, so an in-memory session
+survives the whole run [D]. Untested on a real plugin (OQ12).
+
+Per preset × pitch × velocity (`--notes`, default C2,C3,C4 [D]; `--velocities`, default 50,110 [D]):
+`--takes` (5 [D]) renders, each from the complete state after a reset (CLAUDE.md rule 5): one note, held
+`--gate` ms (1000 [D]), then released and left to ring. A take **ends when the note has dropped below**
+`--end-db` (-60 dBFS peak in 10 ms windows [D]); the renderer stops earlier at -80 dB, and
+`--max-tail-ms` (8000 [D]) bounds the wait. A take is never shorter than the held note, and fades out over
+30 ms. Because every take is an offline render from a reset, there is no real-time pause between takes;
+variation comes from the plugin itself (random phase, free-running modulation, unison drift).
+
+**Consensus**: the medoid of the usable takes. The distance of two takes is the embedding distance (04 §7,
+level free) or the level difference in dB, whichever is larger; the take with the smallest summed distance
+to the others wins, ties to the earliest. A failed or silent take (peak below `--end-db` throughout) is
+recorded in the manifest with its reason and takes no part. The chosen take's mean distance to the others is
+its `spread`; above `--max-spread` (2.0 [D]) the tone is flagged `unstable` (still written, so the training
+can drop it or weigh it). A combination with no usable take is recorded with status `no usable take`.
+
+**Output**: `<out>/<preset stem>/<note>_v<velocity>.wav` (stem from the library, e.g. `003-Pluck/C3_v110.wav`;
+note names as `parse_note_name`, sharps as `Cs`), 32-bit float, as rendered (level is part of the target).
+`--keep-takes` also writes every take as `<note>_v<velocity>_take<N>.wav`. `<out>/tones.json` lists every
+combination: preset, note, velocity, the absolute paths of the preset's `.state` and `params.json`, the file,
+duration, chosen take, spread, status and the per-take outcome, level and distance. `--preset a,b` limits
+the run to library entries whose name contains one of the words.
+
+## 6b. Parameter sweeps (`mimicry sweep`) [A]
+
+Training material that is independent of any preset: the source plugin is driven through a systematic,
+repeatable set of parameter settings and every setting is rendered as a tone. A calibrator (or the fitter)
+learns from the source side what each setting sounds like and finds the target settings that sound the same.
+6a answers "match this preset"; 6b answers "what does each knob do, and where is the same sound on the other
+plugin". The two use the same renderer, tone reduction and output layout.
+
+**Base tone**: `--base` is a `.state` file, a harvested preset (`--presets DIR --preset NAME`) or the plugin's
+defaults. A *plain tone* (`--base plain`) is built from the defaults by moving the parameters that colour or
+shape the sound to their neutral extreme: roles (03 §2) filter cutoff fully open, resonance zero, envelope
+sustain full, attack and release short, modulation depths and effect mixes zero, detune zero, one oscillator
+audible. The roles decide; a parameter with no role stays at its default. The resulting state is written
+(`plain.state`, `plain.params.json`) so the target side can start from its own plain tone built the same way.
+
+**Plan** (`sweep.json`, written before any rendering, so the run can be cancelled and continued):
+1. *One at a time*: for every active parameter (probe class not `dead`, not fixed by 03 §6, in `--only`),
+   `--points` values (7 [D]) in the source's normalised coordinate `u`: 0, 1 and interior points that are
+   equally spaced in the parameter's *probe warp* (log parameters get log spacing, 04 §9), snapped to the
+   grid for stepped parameters (every step of a categorical with at most 8 values).
+2. *Pairs* (`--pairs N`, default 0): the N most interacting parameter pairs of the probe (04 §3), a 3 × 3
+   grid each.
+3. *Joint* (`--joint N`, default 0): N scrambled-Sobol points over the active parameters inside the safe box,
+   for coverage of combinations. The seed is stored.
+Each setting is the base state with the listed parameters replaced; all others stay at the base values.
+Notes follow 6a (`--notes`, `--velocities`; default one pitch C3 and velocity 100 for a sweep [D]), one take
+unless `--takes` says otherwise.
+
+**Output**: `<out>/<setting id>.wav` plus `sweep.json` with, per setting, the source parameter ids and
+values (`u` and value text), its kind (one-at-a-time, pair, joint), the base, the rendered file, status and
+the tone's feature vector (04 §7) with the level. Settings that fail or are silent are recorded with their
+reason (05); they are never dropped.
+
+**Repeating the sweep on the target** (`mimicry sweep --replay sweep.json --plugin TARGET`). Knob positions are
+not portable: the same `u` can be 1 kHz on one plugin and 6 kHz on another, and the engines differ. The
+target side is therefore aligned by *effect*, not by position:
+1. *Pair the parameters.* Source parameter → target parameter(s) comes from `knob_map.json` (04 §8, WP5.4a),
+   or from `--map FILE` the user edited. A source parameter with no partner is *unmapped* and is listed; its
+   settings are skipped on the target and stay in the source set for the calibrator (it has no target
+   counterpart). Target parameters nobody maps to (extra effects, say) stay at the target's plain tone.
+2. *Measure an effect curve.* For each paired source parameter the sweep already holds the feature curve
+   `f_s(u)` of its own tone (cutoff estimate in Hz, attack time, brightness, level, ... : the features of 04
+   §3 that the role names). The target is swept on a finer grid (`--target-points`, 15 [D]) to get `f_t(v)`.
+3. *Invert.* For each source setting the target value `v` is the one whose `f_t` equals the source's `f_s`
+   (monotone interpolation, clipped to the target's range). Where the ranges do not overlap, `v` is clipped
+   and the setting is marked `clipped` with the residual feature gap. Where the feature is not monotone in
+   the parameter, the closest point that is inside the safe box is used and flagged.
+4. *Render* the target settings, one at a time and then pairs and joint settings through the same inversion
+   per parameter, and write `sweep-target.json` in the same shape plus the `source` setting it answers and the
+   residual gap. A final check re-renders a sample (`--verify N`, 8 [D]) and reports the distance to the source
+   tone; large values mean the engines differ and the pair is a weak training example (weighted down in the
+   export, not removed).
+
+**Export for training** (`sweep-pairs.json`): rows of (source parameters, target parameters, source WAV,
+target WAV, clipped, residual, weight). This is the knob alignment the calibrator learns from: source
+setting → target setting that sounds the same, with per-pair confidence. It also feeds the learned map
+(04 §8, WP5.4b) as ready-made pairs, so the map improves without solving presets.
+
+**Limits [D]**: the inversion assumes the feature named by the role is what the user cares about, so it is
+only as good as the roles; different sound engines mean the pairs are close, not identical (the residual
+says by how much); parameters whose effect is only in combination are covered by the pair and joint sets
+only as far as `--pairs` and `--joint` go. A plugin with an editor-only state (06 §6) that needs a login uses
+the same `--editor` flow as 6a.
 
 ## 7. Least-error transfer [A]
 

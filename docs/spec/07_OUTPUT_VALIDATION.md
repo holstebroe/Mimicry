@@ -19,6 +19,16 @@ and `test/resources/<src>/stage<N>/`]:
 
 Always listen to `ab.wav`: the score smooths over narrow features that matter by ear [S].
 
+Implemented [A] (WP6.1, 6.5): `report.md` has the status (and how often the run was resumed), plugin and
+target, result, repeatability floor, pitch method, the stage table, the loss of each feature for the best
+candidate, **parameters at a bound** of their searched range (within 1 % of the safe box), the outcome counts and
+the learned hazards. `diff.ppm` is three log-frequency spectrograms stacked (target, match at the solved gain,
+difference in dB: blue where the match is quieter, red louder, faded below the noise floor), 480 columns by
+160 rows each; `diff.bmp` is the same image as a 24-bit BMP for viewers that do not read PPM. `best.vstpreset` is written for VST3 targets. A run that was cancelled writes all of these too
+(`"status": "cancelled"` in `result.json`), plus `checkpoint.json` and `run.json` (09 §3). `mimicry eval --plugin P
+--state S --wav T.wav` scores a `best.state` or a `.vstpreset` without fitting (gain solved, onset offset
+estimated; per-feature losses; `--json`).
+
 ## 2. Generalisation checks
 
 - **Holdout**: render the match at keys, velocities and gates that were not fitted and score them
@@ -37,7 +47,7 @@ Every run writes `best.state` and `best.params.json`.
   DAW depends on the host (load plugin state, or the plugin's preset import). `best.params.json` is the
   portable form. Plugins with a parameter-file import (as Acidus's IMPORT CALIBRATION) can use it
   directly.
-- **VST3 targets**: Mimicry also writes a **`.vstpreset`** file, the format hosts load natively. It holds
+- **VST3 targets** (`output/VstPreset`): Mimicry also writes a **`.vstpreset`** file, the format hosts load natively. It holds
   the component state and the controller state in the format's chunk layout (header, chunks, chunk list)
   as documented in the VST3 SDK; the class id is the plugin's. The file is verified by loading it back
   through the host and comparing a render (T14), and by the SDK's validator where available. For
@@ -72,6 +82,8 @@ All tests are executables run by `ctest`; DSP-style tests return non-zero on fai
 | T17 | **Harvest**: the test synth's factory presets found and loaded through CLAP preset discovery, VST3 program data, the VST3 program list and MIDI program change; every preset `ok`, the planted duplicate and the planted no-op preset reported as such; the recipe is stored and reused; source renders from the captured state equal renders from the preset's parameters. Implemented in `host_*` (every method in-process, file location, state files, preset-load errors) and `harvest_clap`/`harvest_vst3` (through a worker: per method, ladder stop, recipe first, library files and report, library states reloaded as file presets, state render through shared memory, `mimicry harvest` twice with the recipe); VST3 program data has no fixture (clap-wrapper lacks it) |
 | T18 | **Effects**: `mimicry_test_fx` (CLAP and VST3) renders the probe signals with input and latency compensation in both formats; reamp fit and effect-to-effect transfer recover random presets within 1.5x the floor; effect features pass their T4 cases |
 | T19 | **Map**: test synth CLAP → test synth VST3 maps every parameter to itself with full confidence; against a renamed and re-tapered variant, roles and laws are recovered within tolerance |
+| T21 | **Cancel and resume**: see 09 §6 (`opt`, `cli_clap`, `cli_vst3`, `cli_clap_to_vst3`); harvest cancel and `--continue` in `harvest_*` |
+| T22 | **Front end logic**: see 09 §6 (`gui_core`, `gui_e2e_clap`) |
 | T20 | **Doctor**: report written for the test synth and the test effect in both formats, `report.json` numbers equal the probe's, the planted hazards appear in the health section; the frequency response of the test effect's filter matches its analytic response within 0.5 dB |
 
 ## 5. `mimicry_test_synth`

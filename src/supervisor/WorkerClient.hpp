@@ -57,9 +57,33 @@ public:
     [[nodiscard]] expected<std::vector<std::uint8_t>, host::HostError> save_state() override;
     [[nodiscard]] expected<void, host::HostError> load_state(const std::vector<std::uint8_t>& blob) override;
     [[nodiscard]] expected<void, host::HostError> reset() override;
+    // The editor opens in the worker (the plugin never runs in this process, rule 4); the worker pumps its
+    // window while it waits for the next command.
+    using host::Instance::open_editor;  // the form with a parent window is for in-process instances
+    [[nodiscard]] expected<void, host::HostError> open_editor() override;
+    void close_editor() override;
     [[nodiscard]] expected<std::vector<host::PresetRef>, host::HostError> presets() override;
     // A crash or hang while loading costs the worker (restarted on the next call); the error says which.
     [[nodiscard]] expected<host::CapturedPreset, host::HostError> apply_preset(const host::PresetRef& ref, double wait_ms = 200) override;
+
+    // The editor session of a capture (Windows workers, docs/spec/06_TARGETS.md section 6): the worker opens the
+    // plugin's editor in a window of its own and keeps the captures; the supervisor polls and takes them. A lost
+    // worker ends the session.
+    struct EditorStatus {
+        bool open = false, teaching = false, taught = false, auto_running = false;
+        int captures = 0;
+        int signals = 0;                  // preset-change signals since the last poll
+        std::vector<std::string> events;  // what happened since the last poll ("captured 3", "closed", ...)
+        json::Value click;                // the taught click, null before
+    };
+    using host::Instance::editor_open;
+    [[nodiscard]] expected<host::EditorSize, host::HostError> editor_open(const std::string& title, const json::Value& click = {});
+    [[nodiscard]] expected<EditorStatus, host::HostError> editor_poll();
+    // Capture `index` of the session; `hash` receives its state hash.
+    [[nodiscard]] expected<host::CapturedPreset, host::HostError> editor_take(int index, std::string* hash = nullptr);
+    // "capture" (options: name), "teach", "auto" (max, wait_ms), "stop", "done".
+    [[nodiscard]] expected<void, host::HostError> editor_action(const std::string& action, const json::Value& options = {});
+    void editor_close();
 
     [[nodiscard]] const WorkerStats& stats() const { return stats_; }
     // Non-empty once the plugin's parameter table differs from the one it had when first opened (a restart

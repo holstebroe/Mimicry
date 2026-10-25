@@ -5,6 +5,7 @@
 
 #include <condition_variable>
 #include <functional>
+#include <memory>
 #include <mutex>
 #include <thread>
 
@@ -60,6 +61,15 @@ public:
     [[nodiscard]] expected<std::vector<PresetRef>, HostError> presets() override;
     [[nodiscard]] expected<CapturedPreset, HostError> apply_preset(const PresetRef& ref, double wait_ms = 200) override;
 
+    [[nodiscard]] expected<EditorSize, HostError> open_editor(void* parent_window, EditorEvents events) override;
+    void editor_resized(int width, int height) override { engine_->editor_resized(width, height); }
+    void close_editor() override;
+    [[nodiscard]] expected<CapturedPreset, HostError> capture_current(const std::string& name) override;
+    [[nodiscard]] int take_change_signals() override { return engine_->take_change_signals(); }
+    // The convenience form (sign-in before a run): a top-level window of the host, serviced by pump().
+    [[nodiscard]] expected<void, HostError> open_editor() override;
+    [[nodiscard]] bool editor_open() const override;
+
     // Reset before every render (default). Turning it off is for profiling only: a candidate must
     // start from a clean state (CLAUDE.md rule 5).
     void set_reset_each_render(bool on) { reset_each_render_ = on; }
@@ -80,6 +90,7 @@ private:
     std::shared_ptr<ThreadRoles> roles_;
     RenderThread thread_;
     MessagePump pump_;
+    std::shared_ptr<class EditorWindow> window_;  // the convenience editor window, if open
     int rate_ = 48000;
     int max_block_ = 512;
     bool started_ = false;

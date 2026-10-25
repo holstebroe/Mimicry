@@ -11,6 +11,7 @@
 #include <format>
 #include <fstream>
 #include <iterator>
+#include <map>
 #include <mutex>
 #include <optional>
 #include <thread>
@@ -19,6 +20,7 @@
 
 #include "base/source/fstring.h"
 #include "pluginterfaces/base/funknown.h"
+#include "pluginterfaces/gui/iplugview.h"
 #include "pluginterfaces/vst/ivstaudioprocessor.h"
 #include "pluginterfaces/vst/ivstcomponent.h"
 #include "pluginterfaces/vst/ivsteditcontroller.h"
@@ -77,19 +79,54 @@ std::string utf8(const TChar* s) {
 class Handler final : public IComponentHandler {
 public:
     std::atomic<bool> restart{false}, rescan{false};
+    // The user's edits in the editor (spec 06 section 6): the host has to pass them to the processor, which a
+    // capture does in one block. `signals` counts them for watch mode.
+    std::mutex edit_mutex;
+    std::map<ParamID, double> edits;
+    std::atomic<int> signals{0};
 
     tresult PLUGIN_API beginEdit(ParamID) override { return kResultOk; }
-    tresult PLUGIN_API performEdit(ParamID, Steinberg::Vst::ParamValue) override { return kResultOk; }
+    tresult PLUGIN_API performEdit(ParamID id, Steinberg::Vst::ParamValue value) override {
+        std::lock_guard lock(edit_mutex);
+        edits[id] = value;
+        ++signals;
+        return kResultOk;
+    }
     tresult PLUGIN_API endEdit(ParamID) override { return kResultOk; }
     tresult PLUGIN_API restartComponent(int32 flags) override {
         if (flags & (kReloadComponent | kLatencyChanged | kParamTitlesChanged)) restart = true;
         if (flags & (kReloadComponent | kParamTitlesChanged)) rescan = true;
+        if (flags & kParamValuesChanged) ++signals;
         return kResultOk;
     }
 
-    tresult PLUGIN_API queryInterface(const TUID iid, void** obj) override {
-        if (FUnknownPrivate::iidEqual(iid, IComponentHandler::iid) || FUnknownPrivate::iidEqual(iid, FUnknown::iid)) {
+    tresult PLUGIN_API queryInterface(const TUID riid, void** obj) override {
+        if (FUnknownPrivate::iidEqual(riid, IComponentHandler::iid) || FUnknownPrivate::iidEqual(riid, FUnknown::iid)) {
             *obj = static_cast<IComponentHandler*>(this);
+            return kResultOk;
+        }
+        *obj = nullptr;
+        return kNoInterface;
+    }
+    uint32 PLUGIN_API addRef() override { return 1; }  // owned by the engine
+    uint32 PLUGIN_API release() override { return 1; }
+};
+
+// The host side of the plugin's editor view: the plugin asks for a new size, the window follows.
+class Frame final : public IPlugFrame {
+public:
+    std::function<void(int, int)> resize;
+    tresult PLUGIN_API resizeView(IPlugView* view, ViewRect* rect) override {
+        if (!rect) return kInvalidArgument;
+        if (resize) resize(rect->getWidth(), rect->getHeight());
+        // The window has the new size now (the callback is synchronous): tell the view.
+        ViewRect now{0, 0, rect->getWidth(), rect->getHeight()};
+        if (view) view->onSize(&now);
+        return kResultOk;
+    }
+    tresult PLUGIN_API queryInterface(const TUID iid, void** obj) override {
+        if (FUnknownPrivate::iidEqual(iid, IPlugFrame::iid) || FUnknownPrivate::iidEqual(iid, FUnknown::iid)) {
+            *obj = static_cast<IPlugFrame*>(this);
             return kResultOk;
         }
         *obj = nullptr;
@@ -104,6 +141,7 @@ public:
     explicit Vst3Engine(std::shared_ptr<ThreadRoles> roles) : roles_(std::move(roles)) {}
 
     ~Vst3Engine() override {
+        close_editor();
         if (controller_) controller_->setComponentHandler(nullptr);
         data_.unprepare();
         // Every interface pointer goes before the module: one released after FreeLibrary calls into unloaded
@@ -273,6 +311,69 @@ public:
     }
 
     bool take_restart_request() override { return handler_.restart.exchange(false); }
+
+    // Editor (Windows only): IEditController::createView("editor"), attached to the worker's window as an HWND,
+    // with a frame that follows the plugin's resize requests.
+    expected<EditorSize, HostError> open_editor(void* parent, EditorEvents events) override {
+#if defined(_WIN32)
+        if (!controller_) return unexpected(HostError{"the plugin has no edit controller"});
+        close_editor();
+        view_ = owned(controller_->createView(ViewType::kEditor));
+        if (!view_) return unexpected(HostError{"the plugin has no editor"});
+        if (view_->isPlatformTypeSupported(kPlatformTypeHWND) != kResultTrue) {
+            view_ = nullptr;
+            return unexpected(HostError{"the plugin's editor does not support a Win32 window"});
+        }
+        ViewRect r{};
+        if (view_->getSize(&r) != kResultOk) r = ViewRect{0, 0, 800, 600};
+        frame_.resize = std::move(events.resize);
+        view_->setFrame(&frame_);
+        {
+            std::lock_guard lock(handler_.edit_mutex);
+            handler_.edits.clear();  // edits before the window opened are not the user's
+        }
+        if (view_->attached(parent, kPlatformTypeHWND) != kResultOk) {
+            view_->setFrame(nullptr);
+            view_ = nullptr;
+            return unexpected(HostError{"the plugin's editor could not attach to the window"});
+        }
+        EditorSize size;
+        size.width = r.getWidth();
+        size.height = r.getHeight();
+        size.resizable = view_->canResize() == kResultTrue;
+        return size;
+#else
+        (void)parent;
+        (void)events;
+        return unexpected(HostError{"plugin editors are hosted on Windows only"});
+#endif
+    }
+    void editor_resized(int width, int height) override {
+        if (!view_) return;
+        ViewRect r{0, 0, width, height};
+        ViewRect ok = r;
+        if (view_->checkSizeConstraint(&ok) == kResultTrue) r = ok;
+        view_->onSize(&r);
+    }
+    void close_editor() override {
+        if (!view_) return;
+        view_->removed();
+        view_->setFrame(nullptr);
+        view_ = nullptr;
+        frame_.resize = nullptr;
+    }
+    std::vector<ParamValue> take_edits() override {
+        std::map<ParamID, double> edits;
+        {
+            std::lock_guard lock(handler_.edit_mutex);
+            edits.swap(handler_.edits);
+        }
+        std::vector<ParamValue> out;
+        for (const auto& [id, v] : edits)
+            if (index_.count(id)) out.push_back({id, std::clamp(v, 0.0, 1.0)});  // parameters of the table only
+        return out;
+    }
+    int take_change_signals() override { return handler_.signals.exchange(0); }
 
     // --- presets (docs/spec/02_HOSTING.md section 7) ---
 
@@ -569,6 +670,8 @@ private:
     VST3::Hosting::Module::Ptr module_;
     HostApplication host_app_;
     Handler handler_;
+    Frame frame_;
+    IPtr<IPlugView> view_;
     IPtr<PlugProvider> provider_;
     IPtr<IComponent> component_;
     IPtr<IEditController> controller_;

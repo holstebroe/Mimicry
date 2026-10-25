@@ -42,3 +42,33 @@ git submodule update --init
 cmake -B build -DCMAKE_BUILD_TYPE=Release && cmake --build build -j
 ctest --test-dir build
 ```
+
+## Scope and compatibility
+
+- Assume every project is pre-release with no existing users, saved data, or external consumers, unless I say otherwise or the repo clearly shows otherwise (tagged releases, a migrations folder, a changelog, a versioned public API).
+- Do not add compatibility shims, legacy fallbacks, deprecated aliases, data migrations, or version checks for old formats. When a design changes, replace the old behavior outright and delete the old code.
+- If a change would break something that really matters (for example a file format I've already shipped), ask once before adding compatibility code.
+
+## Minimal changes
+
+- Default to the smallest change that solves the stated problem. Before writing code, ask: can this be fixed by changing a line, or by deleting something?
+- Prefer deleting or simplifying existing code over adding new code.
+- Accept small compromises to keep a diff small. An edge case behaving slightly differently is fine if you tell me.
+- Don't add abstractions, helpers, config options, parameters, interfaces, or new files for a single use. Wait until there are at least three real call sites.
+- Don't add defensive code for cases that can't happen (extra null checks, try/catch around internal calls, validation between internal functions). Validate only at system boundaries: user input, network, files.
+- Don't refactor, rename, reformat, or clean up code unrelated to the task. If you notice something worth fixing, mention it in one line.
+- Don't add tests, docs, or comments beyond what I asked for. Comments explain why, never what.
+- If a change seems to need more than ~30 lines or touches more than a couple of files, stop and propose the approach first, including a smaller alternative.
+
+## Reporting tradeoffs
+
+- After a change, state in one or two sentences what behavior changed or was dropped by keeping it minimal (e.g. "no longer handles X; handling it would need ~40 more lines").
+- Don't silently preserve old behavior by adding code. If keeping it is costly, say so and let me decide.
+
+## Suggesting refactors
+
+- Implement the minimal fix first. Then, if a refactor would clearly make the code simpler, smaller, or more coherent, propose it in a short note after the change. Don't apply it until I approve.
+- Good triggers: the same logic now exists in three or more places; the fix was awkward because of a structural problem; code, parameters, or branches became dead or redundant; two near-identical functions or types could become one.
+- Don't suggest refactors that only change style, move code without simplifying it, or add indirection.
+- Describe each suggestion in one or two lines with a concrete effect (e.g. "removes ~60 lines, merges parseA and parseB"). If you can't state a concrete benefit, don't suggest it.
+- Suggest at most one or two per task. If I decline, don't raise it again in the same session.
