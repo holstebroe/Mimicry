@@ -294,6 +294,70 @@ combination: preset, note, velocity, the absolute paths of the preset's `.state`
 duration, chosen take, spread, status and the per-take outcome, level and distance. `--preset a,b` limits
 the run to library entries whose name contains one of the words.
 
+## 6b. Parameter sweeps (`mimicry sweep`) [A]
+
+Training material that is independent of any preset: the source plugin is driven through a systematic,
+repeatable set of parameter settings and every setting is rendered as a tone. A calibrator (or the fitter)
+learns from the source side what each setting sounds like and finds the target settings that sound the same.
+6a answers "match this preset"; 6b answers "what does each knob do, and where is the same sound on the other
+plugin". The two use the same renderer, tone reduction and output layout.
+
+**Base tone**: `--base` is a `.state` file, a harvested preset (`--presets DIR --preset NAME`) or the plugin's
+defaults. A *plain tone* (`--base plain`) is built from the defaults by moving the parameters that colour or
+shape the sound to their neutral extreme: roles (03 §2) filter cutoff fully open, resonance zero, envelope
+sustain full, attack and release short, modulation depths and effect mixes zero, detune zero, one oscillator
+audible. The roles decide; a parameter with no role stays at its default. The resulting state is written
+(`plain.state`, `plain.params.json`) so the target side can start from its own plain tone built the same way.
+
+**Plan** (`sweep.json`, written before any rendering, so the run can be cancelled and continued):
+1. *One at a time*: for every active parameter (probe class not `dead`, not fixed by 03 §6, in `--only`),
+   `--points` values (7 [D]) in the source's normalised coordinate `u`: 0, 1 and interior points that are
+   equally spaced in the parameter's *probe warp* (log parameters get log spacing, 04 §9), snapped to the
+   grid for stepped parameters (every step of a categorical with at most 8 values).
+2. *Pairs* (`--pairs N`, default 0): the N most interacting parameter pairs of the probe (04 §3), a 3 × 3
+   grid each.
+3. *Joint* (`--joint N`, default 0): N scrambled-Sobol points over the active parameters inside the safe box,
+   for coverage of combinations. The seed is stored.
+Each setting is the base state with the listed parameters replaced; all others stay at the base values.
+Notes follow 6a (`--notes`, `--velocities`; default one pitch C3 and velocity 100 for a sweep [D]), one take
+unless `--takes` says otherwise.
+
+**Output**: `<out>/<setting id>.wav` plus `sweep.json` with, per setting, the source parameter ids and
+values (`u` and value text), its kind (one-at-a-time, pair, joint), the base, the rendered file, status and
+the tone's feature vector (04 §7) with the level. Settings that fail or are silent are recorded with their
+reason (05); they are never dropped.
+
+**Repeating the sweep on the target** (`mimicry sweep --replay sweep.json --plugin TARGET`). Knob positions are
+not portable: the same `u` can be 1 kHz on one plugin and 6 kHz on another, and the engines differ. The
+target side is therefore aligned by *effect*, not by position:
+1. *Pair the parameters.* Source parameter → target parameter(s) comes from `knob_map.json` (04 §8, WP5.4a),
+   or from `--map FILE` the user edited. A source parameter with no partner is *unmapped* and is listed; its
+   settings are skipped on the target and stay in the source set for the calibrator (it has no target
+   counterpart). Target parameters nobody maps to (extra effects, say) stay at the target's plain tone.
+2. *Measure an effect curve.* For each paired source parameter the sweep already holds the feature curve
+   `f_s(u)` of its own tone (cutoff estimate in Hz, attack time, brightness, level, ... : the features of 04
+   §3 that the role names). The target is swept on a finer grid (`--target-points`, 15 [D]) to get `f_t(v)`.
+3. *Invert.* For each source setting the target value `v` is the one whose `f_t` equals the source's `f_s`
+   (monotone interpolation, clipped to the target's range). Where the ranges do not overlap, `v` is clipped
+   and the setting is marked `clipped` with the residual feature gap. Where the feature is not monotone in
+   the parameter, the closest point that is inside the safe box is used and flagged.
+4. *Render* the target settings, one at a time and then pairs and joint settings through the same inversion
+   per parameter, and write `sweep-target.json` in the same shape plus the `source` setting it answers and the
+   residual gap. A final check re-renders a sample (`--verify N`, 8 [D]) and reports the distance to the source
+   tone; large values mean the engines differ and the pair is a weak training example (weighted down in the
+   export, not removed).
+
+**Export for training** (`sweep-pairs.json`): rows of (source parameters, target parameters, source WAV,
+target WAV, clipped, residual, weight). This is the knob alignment the calibrator learns from: source
+setting → target setting that sounds the same, with per-pair confidence. It also feeds the learned map
+(04 §8, WP5.4b) as ready-made pairs, so the map improves without solving presets.
+
+**Limits [D]**: the inversion assumes the feature named by the role is what the user cares about, so it is
+only as good as the roles; different sound engines mean the pairs are close, not identical (the residual
+says by how much); parameters whose effect is only in combination are covered by the pair and joint sets
+only as far as `--pairs` and `--joint` go. A plugin with an editor-only state (06 §6) that needs a login uses
+the same `--editor` flow as 6a.
+
 ## 7. Least-error transfer [A]
 
 The end goal of plugin-to-plugin work is to use the presets of one synth or effect on another with the
