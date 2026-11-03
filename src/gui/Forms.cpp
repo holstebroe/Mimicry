@@ -5,6 +5,8 @@
 #include <fstream>
 #include <sstream>
 
+#include "core/Env.hpp"
+
 namespace mimicry::gui {
 
 namespace fs = std::filesystem;
@@ -210,21 +212,6 @@ std::vector<Form> make_forms() {
     }
     out.push_back(eval);
     return out;
-}
-
-// Reads an environment variable; empty when unset. _dupenv_s avoids the MSVC getenv warning.
-std::string env_value(const char* name) {
-#if defined(_WIN32)
-    char* value = nullptr;
-    std::size_t size = 0;
-    if (_dupenv_s(&value, &size, name) != 0 || !value) return {};
-    std::string out(value);
-    std::free(value);
-    return out;
-#else
-    const char* value = std::getenv(name);
-    return value ? value : "";
-#endif
 }
 
 }  // namespace

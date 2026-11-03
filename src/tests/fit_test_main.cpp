@@ -16,6 +16,7 @@
 #include <sys/wait.h>
 #endif
 
+#include "core/Env.hpp"
 #include "features/Loss.hpp"
 #include "features/Pitch.hpp"
 #include "host/ParamUtil.hpp"
@@ -315,8 +316,10 @@ int main(int argc, char** argv) {
     opt.max_evals = 4000;
     opt.time_cap_s = 240;
     opt.seed_samples = 150;
-    opt.restarts = std::getenv("FIT_R") ? std::atoi(std::getenv("FIT_R")) : 2;
-    opt.seed = std::getenv("FIT_SEED") ? std::uint64_t(std::atoll(std::getenv("FIT_SEED"))) : 3;
+    const std::string restarts = mimicry::env_value("FIT_R");
+    const std::string seed = mimicry::env_value("FIT_SEED");
+    opt.restarts = restarts.empty() ? 2 : std::atoi(restarts.c_str());
+    opt.seed = seed.empty() ? 3 : std::uint64_t(std::atoll(seed.c_str()));
     opt.log = [](const std::string& s) { std::printf("  %s\n", s.c_str()); };
     const auto res = run_pipeline(obj, space, opt);
     std::printf("fit: loss %.3f dB after %ld evals in %.1f s (cache hits %zu); cutoff %.3f (truth %.3f), sustain %.3f "

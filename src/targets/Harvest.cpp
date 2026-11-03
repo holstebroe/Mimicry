@@ -11,6 +11,7 @@
 #include <set>
 #include <sstream>
 
+#include "core/Env.hpp"
 #include "host/Codec.hpp"
 #include "opt/Embedding.hpp"
 #include "opt/Objective.hpp"
@@ -91,10 +92,7 @@ bool blind(PresetMethod m) { return m == PresetMethod::MidiProgram; }
 // The standard VST3 preset folders of a plugin [S: VST3 SDK, "Preset Locations"]: user, then shared.
 std::vector<fs::path> vst3_preset_folders(const host::PluginInfo& info) {
     std::vector<fs::path> roots;
-    auto env = [](const char* name) -> std::string {
-        const char* v = std::getenv(name);
-        return v ? v : "";
-    };
+    auto env = [](const char* name) { return env_value(name); };
 #if defined(_WIN32)
     if (!env("USERPROFILE").empty()) roots.push_back(fs::path(env("USERPROFILE")) / "Documents" / "VST3 Presets");
     if (!env("APPDATA").empty()) roots.push_back(fs::path(env("APPDATA")) / "VST3 Presets");
